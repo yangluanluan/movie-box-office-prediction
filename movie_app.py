@@ -175,7 +175,6 @@ def extract_year(year_str):
 
 def load_and_preprocess(csv_path):
     df = pd.read_csv(csv_path)
-    # 清除所有列名首尾空格
     df.columns = [c.strip() for c in df.columns]
     
     df['GROSS COLLECTION'] = df['GROSS COLLECTION'].apply(parse_gross)
@@ -189,12 +188,10 @@ def load_and_preprocess(csv_path):
     y_raw = df['GROSS COLLECTION']
     y = np.log1p(y_raw)
 
-    # 基础清洗
     X['Year'] = X['Year'].apply(extract_year)
     X['runtime'] = X.astype(str)['runtime'].str.replace(' min', '').astype(float)
     X['votes'] = X.astype(str)['votes'].str.replace(',', '').astype(float)
 
-    # 填充缺失值
     X['DIRECTOR'] = X['DIRECTOR'].fillna("未知导演")
     X['ACTOR 1'] = X['ACTOR 1'].fillna("未知演员")
     X['ACTOR 2'] = X['ACTOR 2'].fillna("未知演员")
@@ -205,7 +202,6 @@ def load_and_preprocess(csv_path):
     X = combined[feature_cols].copy()
     y = combined['GROSS COLLECTION']
 
-    # 分类特征编码
     X['certificate'] = X['certificate'].fillna("unknown")
     le = LabelEncoder()
     X['certificate'] = le.fit_transform(X['certificate'].astype(str))
@@ -213,7 +209,6 @@ def load_and_preprocess(csv_path):
     X['ACTOR 1'] = le.fit_transform(X['ACTOR 1'].astype(str))
     X['ACTOR 2'] = le.fit_transform(X['ACTOR 2'].astype(str))
 
-    # 电影类型多标签编码
     def split_genre(x):
         return str(x).split(',')
     X['genre'] = X['genre'].apply(split_genre)
@@ -236,7 +231,7 @@ def run_streamlit_app(predictor):
     """, unsafe_allow_html=True)
 
     st.markdown('<div class="header">基于Python的电影票房分析预测系统</div>', unsafe_allow_html=True)
-    menu = ["首页", "票房预测"]
+    menu = ["首页", "票房预测", "票房分析"]
     choice = st.sidebar.selectbox("导航", menu)
 
     # 首页
@@ -255,13 +250,12 @@ def run_streamlit_app(predictor):
                 caption="全球电影票房排行榜", width="stretch"
             )
         with col2:
-            st.info("本系统已取消登录验证，可直接前往【票房预测】使用功能")
+            st.info("本系统已取消登录验证，可直接前往【票房预测】或【票房分析】使用功能")
 
     # 票房预测页
     elif choice == "票房预测":
         st.title("电影票房预测模型")
 
-        # 读取CSV并清除列名空格
         df = pd.read_csv("电影数据.csv")
         df.columns = [c.strip() for c in df.columns]
 
@@ -315,7 +309,6 @@ def run_streamlit_app(predictor):
                 data["genre"] = [genre]
                 input_df = pd.DataFrame(data)
 
-                # 编码转换
                 if predictor.le:
                     if certificate not in predictor.le.classes_:
                         default_label = "unknown" if "unknown" in predictor.le.classes_ else predictor.le.classes_[0]
@@ -368,10 +361,58 @@ def run_streamlit_app(predictor):
                 pred = 371300633
                 st.markdown(f"### 模拟预测票房：:red[{pred}] 万元")
 
+    # 票房分析页
+    elif choice == "票房分析":
+        st.title("📊 电影票房数据分析")
+        st.write("以下是电影数据的可视化分析图表，帮助你理解票房的影响因素")
+
+        df = pd.read_csv("电影数据.csv")
+        df.columns = [c.strip() for c in df.columns]
+        df['GROSS COLLECTION'] = df['GROSS COLLECTION'].apply(parse_gross)
+        df = df.dropna(subset=['GROSS COLLECTION']).reset_index(drop=True)
+        df['Year'] = df['Year'].apply(extract_year)
+        df['runtime'] = df.astype(str)['runtime'].str.replace(' min', '').astype(float)
+        df['votes'] = df.astype(str)['votes'].str.replace(',', '').astype(float)
+
+        # 1. 年份票房趋势
+        st.subheader("1. 电影票房随年份变化趋势")
+        year_gross = df.groupby('Year')['GROSS COLLECTION'].mean().dropna()
+        st.line_chart(year_gross)
+
+        # 2. 评分与票房
+        st.subheader("2. 电影评分与票房关系")
+        scatter_df = df[['RATING', 'GROSS COLLECTION']].dropna()
+        st.scatter_chart(scatter_df, x='RATING', y='GROSS COLLECTION')
+
+        # 3. 电影类型平均票房
+        st.subheader("3. 不同类型电影的平均票房")
+        def split_genre(x):
+            return str(x).split(',')
+        df['genre_list'] = df['genre'].apply(split_genre)
+        genre_gross = {}
+        for idx, row in df.iterrows():
+            gross = row['GROSS COLLECTION']
+            for g in row['genre_list']:
+                if g not in genre_gross:
+                    genre_gross[g] = []
+                genre_gross[g].append(gross)
+        genre_avg = {k: np.mean(v) for k, v in genre_gross.items() if k != "nan"}
+        genre_df = pd.DataFrame(list(genre_avg.items()), columns=['类型', '平均票房'])
+        st.bar_chart(genre_df.set_index('类型'))
+
+        # 4. 导演Top10
+        st.subheader("4. 导演Top10平均票房")
+        director_gross = df.groupby('DIRECTOR')['GROSS COLLECTION'].mean().sort_values(ascending=False).head(10)
+        st.bar_chart(director_gross)
+
+        st.info("💡 提示：所有图表数据均来自你上传的电影数据集，可根据需要添加更多分析维度")
+
 # ===================== 程序入口 =====================
 if __name__ == "__main__":
+    # 实例化预测器
     predictor = MovieBoxOfficePredictor()
 
+    # 检查模型文件
     all_model_files = [
         "linear_regression.pkl",
         "ridge_regression.pkl",
@@ -382,22 +423,23 @@ if __name__ == "__main__":
     ]
     has_model = any(os.path.exists(f) for f in all_model_files)
 
+    CSV_FILE = "电影数据.csv"
     if has_model:
-        print("✅ 检测到已有模型文件，开始加载...")
+        print("✅ 检测到已有模型，直接加载...")
         predictor.load_models()
     else:
-        print("⚠️ 未检测到模型，开始完整训练（基模型 + Stacking堆叠模型）")
-        CSV_FILE = "电影数据.csv"
         if os.path.exists(CSV_FILE):
+            print("⚠️ 无预训练模型，开始训练模型，请稍等...")
             X, y, le, mlb = load_and_preprocess(CSV_FILE)
             predictor.le = le
             predictor.mlb = mlb
-            predictor.train_with_kfold(X, y, n_splits=5)
+            predictor.train_with_kfold(X, y)
             predictor.train_stacking(X, y)
             predictor.save_models()
-            print("✅ 全部模型训练+保存完成！")
+            print("✅ 模型训练并保存完成！")
         else:
             print("❌ 未找到 电影数据.csv，进入模拟预测模式")
 
-    print("🚀 启动网页应用...")
+    # 启动网页
+    print("🚀 启动电影票房系统...")
     run_streamlit_app(predictor)
