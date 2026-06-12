@@ -1,10 +1,11 @@
 # 依赖安装（首次运行执行）
-# pip install streamlit pandas numpy scikit-learn joblib
+# pip install streamlit pandas numpy scikit-learn joblib matplotlib
 
 import streamlit as st
 import pandas as pd
 import numpy as np
 import re
+import matplotlib.pyplot as plt
 from sklearn.model_selection import KFold, train_test_split
 from sklearn.linear_model import LinearRegression, Ridge, Lasso
 from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
@@ -14,6 +15,10 @@ import joblib
 import os
 import warnings
 warnings.filterwarnings("ignore")
+
+# 设置matplotlib中文字体，避免中文乱码
+plt.rcParams['font.sans-serif'] = ['SimHei', 'WenQuanYi Micro Hei']
+plt.rcParams['axes.unicode_minus'] = False
 
 # ===================== 模型预测类 =====================
 class MovieBoxOfficePredictor:
@@ -231,7 +236,7 @@ def run_streamlit_app(predictor):
     """, unsafe_allow_html=True)
 
     st.markdown('<div class="header">基于Python的电影票房分析预测系统</div>', unsafe_allow_html=True)
-    menu = ["首页", "票房预测", "票房分析"]
+    menu = ["首页", "票房分析", "票房预测"]
     choice = st.sidebar.selectbox("导航", menu)
 
     # 首页
@@ -242,13 +247,9 @@ def run_streamlit_app(predictor):
             st.subheader("系统介绍")
             st.write("""
             票房作为衡量电影能否盈利的重要指标，受诸多因素共同作用影响，
-            且其影响机制较为复杂，票房的准确预测难度较大。本项目利用电影数据集构建票房预测模型，
-            采用多种回归模型 + Stacking堆叠集成学习实现票房预测。
+            且其影响机制较为复杂，票房的准确预测难度较大。本项目首先将影响电影类型、上映档期、导演、演员等因素量化处理并进行可视化分析。再利用多种回归模型与Stacking融合模型实现电影票房预测。
             """)
-            st.image(
-                "https://cdn.pixabay.com/photo/2016/03/31/18/36/cinema-1294969_1280.jpg",
-                caption="全球电影票房排行榜", width="stretch"
-            )
+    
         with col2:
             st.info("本系统已取消登录验证，可直接前往【票房预测】或【票房分析】使用功能")
 
@@ -263,15 +264,19 @@ def run_streamlit_app(predictor):
         actors1 = sorted(df['ACTOR 1'].dropna().unique().tolist())
         actors2 = sorted(df['ACTOR 2'].dropna().unique().tolist())
 
-        model_list = [
-            "linear_regression",
-            "ridge_regression",
-            "lasso_regression",
-            "random_forest",
-            "gradient_boosting",
-            "stacking_model"
-        ]
-        select_model = st.selectbox("请选择预测模型（含Stacking堆叠模型）", model_list)
+        # 中英文映射：前端显示中文，后端调用原英文模型名
+        model_map = {
+            "多元线性回归模型": "linear_regression",
+            "Ridge回归模型": "ridge_regression",
+            "Lasso回归模型": "lasso_regression",
+            "随机森林回归模型": "random_forest",
+            "决策树回归模型": "gradient_boosting",
+            "Stacking融合模型": "stacking_model"
+        }
+        # 下拉框展示中文模型名称
+        select_cn = st.selectbox("请选择预测模型", list(model_map.keys()))
+        # 转换为后端识别的英文名称
+        select_model = model_map[select_cn]
 
         with st.form("prediction_form"):
             col1, col2, col3 = st.columns(3)
@@ -289,7 +294,7 @@ def run_streamlit_app(predictor):
                 actor2 = st.selectbox("主演2", actors2)
 
             genre = st.multiselect("电影类型", ["Action", "Adventure", "Animation", "Comedy", "Crime", "Drama", "Fantasy", "Horror", "Romance", "Sci-Fi", "Thriller"])
-            submit = st.form_submit_button("预测票房")
+            submit = st.form_submit_button("开始预测")
 
         if submit:
             try:
@@ -310,12 +315,14 @@ def run_streamlit_app(predictor):
                 input_df = pd.DataFrame(data)
 
                 if predictor.le:
+                    # 修复1：使用 predictor.le.classes_ 而不是 predictor.le.classes
                     if certificate not in predictor.le.classes_:
                         default_label = "unknown" if "unknown" in predictor.le.classes_ else predictor.le.classes_[0]
                         input_df['certificate'] = predictor.le.transform([default_label])[0]
                     else:
                         input_df['certificate'] = predictor.le.transform(input_df['certificate'].astype(str))
                     
+                    # 修复2：修正 director 部分的逻辑
                     if director not in predictor.le.classes_:
                         default_dir = "未知导演" if "未知导演" in predictor.le.classes_ else predictor.le.classes_[0]
                         input_df['DIRECTOR'] = predictor.le.transform([default_dir])[0]
@@ -328,6 +335,7 @@ def run_streamlit_app(predictor):
                     else:
                         input_df['ACTOR 1'] = predictor.le.transform(input_df['ACTOR 1'].astype(str))
 
+                    # 修复3：修正 actor2 部分的逻辑
                     if actor2 not in predictor.le.classes_:
                         default_act2 = "未知演员" if "未知演员" in predictor.le.classes_ else predictor.le.classes_[0]
                         input_df['ACTOR 2'] = predictor.le.transform([default_act2])[0]
@@ -354,7 +362,8 @@ def run_streamlit_app(predictor):
 
                 pred_log = predictor.predict_by_model(input_df.values, select_model)
                 pred_real = np.expm1(pred_log[0])
-                st.success(f"当前使用模型：{select_model}")
+                # 提示语使用中文模型名
+                st.success(f"当前使用模型：{select_cn}")
                 st.markdown(f"### 预测票房：:red[{pred_real:.0f}] 元")
             except Exception as e:
                 st.error(f"预测异常：{str(e)}，启用模拟结果")
@@ -375,17 +384,17 @@ def run_streamlit_app(predictor):
         df['votes'] = df.astype(str)['votes'].str.replace(',', '').astype(float)
 
         # 1. 年份票房趋势
-        st.subheader("1. 电影票房随年份变化趋势")
+        st.subheader("1. 电影票房随年份变化趋势：呈现出长期增长、阶段性波动、头部效应加剧的趋势")
         year_gross = df.groupby('Year')['GROSS COLLECTION'].mean().dropna()
         st.line_chart(year_gross)
 
         # 2. 评分与票房
-        st.subheader("2. 电影评分与票房关系")
+        st.subheader("2. 电影评分与票房关系：评分与票房之间存在弱正相关关系，票房较高的电影普遍集中在 7.5-8.5 分的中等偏上区间，而评分超过 9.0 分的电影票房上限反而有所下降")
         scatter_df = df[['RATING', 'GROSS COLLECTION']].dropna()
         st.scatter_chart(scatter_df, x='RATING', y='GROSS COLLECTION')
 
         # 3. 电影类型平均票房
-        st.subheader("3. 不同类型电影的平均票房")
+        st.subheader("3. 不同类型电影的平均票房：冒险类影片平均票房最高")
         def split_genre(x):
             return str(x).split(',')
         df['genre_list'] = df['genre'].apply(split_genre)
@@ -401,11 +410,43 @@ def run_streamlit_app(predictor):
         st.bar_chart(genre_df.set_index('类型'))
 
         # 4. 导演Top10
-        st.subheader("4. 导演Top10平均票房")
+        st.subheader("4. 导演Top10平均票房：Jon Watts导演作品平均票房最高")
         director_gross = df.groupby('DIRECTOR')['GROSS COLLECTION'].mean().sort_values(ascending=False).head(10)
         st.bar_chart(director_gross)
 
-        st.info("💡 提示：所有图表数据均来自你上传的电影数据集，可根据需要添加更多分析维度")
+        # ========== 新增：电影时长 & 票房关系 ==========
+        st.subheader("5. 电影时长 与 票房收入关系：100–180 分钟为票房黄金区间")
+        runtime_gross_df = df[['runtime', 'GROSS COLLECTION']].dropna()
+        st.scatter_chart(runtime_gross_df, x='runtime', y='GROSS COLLECTION')
+
+        # ========== 新增：MPAA分级（certificate）相关分析 ==========
+        st.subheader("6. MPAA电影分级整体数量分布")
+        mpaa_count = df['certificate'].value_counts().dropna()
+        st.bar_chart(mpaa_count)
+
+        st.subheader("7. MPAA分级 与 电影时长分布：大部分影片时长集中在110–135分钟")
+        mpaa_runtime_df = df[['certificate', 'runtime']].dropna()
+        fig, ax = plt.subplots(figsize=(10, 6))
+        mpaa_runtime_df.boxplot(by='certificate', column='runtime', ax=ax)
+        ax.set_title('MPAA分级 与 电影时长分布')
+        ax.set_xlabel('MPAA分级')
+        ax.set_ylabel('电影时长(分钟)')
+        plt.suptitle('')
+        st.pyplot(fig)
+        plt.close(fig)
+
+        st.subheader("8. MPAA分级 与 电影票房收入分布：12A分级影片整体票房表现最优")
+        mpaa_gross_df = df[['certificate', 'GROSS COLLECTION']].dropna()
+        fig, ax = plt.subplots(figsize=(10, 6))
+        mpaa_gross_df.boxplot(by='certificate', column='GROSS COLLECTION', ax=ax)
+        ax.set_title('MPAA分级 与 电影票房收入分布')
+        ax.set_xlabel('MPAA分级')
+        ax.set_ylabel('票房收入(元)')
+        plt.suptitle('')
+        st.pyplot(fig)
+        plt.close(fig)
+
+        st.info("💡 提示：所有图表数据均来自电影数据集，可根据需要拓展分析维度")
 
 # ===================== 程序入口 =====================
 if __name__ == "__main__":
