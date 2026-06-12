@@ -420,26 +420,26 @@ def run_streamlit_app(predictor):
         mpaa_count = df['certificate'].value_counts().dropna()
         st.bar_chart(mpaa_count)
 
-        # 7. MPAA分级 & 电影时长箱线图
+        # 7. MPAA分级 & 电影时长箱线图（修复中文乱码）
         st.subheader("7. MPAA分级 与 电影时长分布：大部分影片时长集中在110–135分钟")
         mpaa_runtime_df = df[['certificate', 'runtime']].dropna()
         fig, ax = plt.subplots(figsize=(10, 6))
         mpaa_runtime_df.boxplot(by='certificate', column='runtime', ax=ax)
-        ax.set_title('MPAA分级 与 电影时长分布')
-        ax.set_xlabel('MPAA分级')
-        ax.set_ylabel('电影时长(分钟)')
+        ax.set_title('MPAA分级 与 电影时长分布', fontproperties=plt.rcParams['font.sans-serif'][0])
+        ax.set_xlabel('MPAA分级', fontproperties=plt.rcParams['font.sans-serif'][0])
+        ax.set_ylabel('电影时长(分钟)', fontproperties=plt.rcParams['font.sans-serif'][0])
         plt.suptitle('')
         st.pyplot(fig)
         plt.close(fig)
 
-        # 8. MPAA分级 & 票房箱线图
+        # 8. MPAA分级 & 票房箱线图（修复中文乱码）
         st.subheader("8. MPAA分级 与 电影票房收入分布：12A分级影片整体票房表现最优")
         mpaa_gross_df = df[['certificate', 'GROSS COLLECTION']].dropna()
         fig, ax = plt.subplots(figsize=(10, 6))
         mpaa_gross_df.boxplot(by='certificate', column='GROSS COLLECTION', ax=ax)
-        ax.set_title('MPAA分级 与 电影票房收入分布')
-        ax.set_xlabel('MPAA分级')
-        ax.set_ylabel('票房收入(元)')
+        ax.set_title('MPAA分级 与 电影票房收入分布', fontproperties=plt.rcParams['font.sans-serif'][0])
+        ax.set_xlabel('MPAA分级', fontproperties=plt.rcParams['font.sans-serif'][0])
+        ax.set_ylabel('票房收入(元)', fontproperties=plt.rcParams['font.sans-serif'][0])
         plt.suptitle('')
         st.pyplot(fig)
         plt.close(fig)
