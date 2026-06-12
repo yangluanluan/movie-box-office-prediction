@@ -16,6 +16,13 @@ import os
 import warnings
 warnings.filterwarnings("ignore")
 
+# ===================== 全局Matplotlib中文配置（优先执行，适配本地+云端） =====================
+plt.rcParams['font.sans-serif'] = ['WenQuanYi Micro Hei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans']
+plt.rcParams['axes.unicode_minus'] = False
+plt.rcParams.update()
+# 提取全局字体变量，统一调用
+GLOBAL_FONT = plt.rcParams['font.sans-serif'][0]
+
 # ===================== 模型预测类 =====================
 class MovieBoxOfficePredictor:
     def __init__(self):
@@ -175,6 +182,9 @@ def extract_year(year_str):
     return int(res[0]) if res else np.nan
 
 def load_and_preprocess(csv_path):
+    if not os.path.exists(csv_path):
+        raise FileNotFoundError(f"未找到数据文件: {csv_path}")
+        
     df = pd.read_csv(csv_path)
     df.columns = [c.strip() for c in df.columns]
     
@@ -231,11 +241,6 @@ def run_streamlit_app(predictor):
         </style>
     """, unsafe_allow_html=True)
 
-    # 全局修复 Matplotlib 中文乱码（适配本地 + Streamlit Cloud）
-    plt.rcParams['font.sans-serif'] = ['WenQuanYi Micro Hei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans']
-    plt.rcParams['axes.unicode_minus'] = False
-    plt.rcParams.update()
-
     st.markdown('<div class="header">基于Python的电影票房分析预测系统</div>', unsafe_allow_html=True)
     menu = ["首页", "票房分析", "票房预测"]
     choice = st.sidebar.selectbox("导航", menu)
@@ -258,13 +263,17 @@ def run_streamlit_app(predictor):
     # 票房预测页
     elif choice == "票房预测":
         st.title("电影票房预测模型")
+        csv_path = "电影数据.csv"
+        if not os.path.exists(csv_path):
+            st.warning("未找到电影数据文件，仅可使用模拟预测")
+            df = pd.DataFrame()
+        else:
+            df = pd.read_csv(csv_path)
+            df.columns = [c.strip() for c in df.columns]
 
-        df = pd.read_csv("电影数据.csv")
-        df.columns = [c.strip() for c in df.columns]
-
-        directors = sorted(df['DIRECTOR'].dropna().unique().tolist())
-        actors1 = sorted(df['ACTOR 1'].dropna().unique().tolist())
-        actors2 = sorted(df['ACTOR 2'].dropna().unique().tolist())
+        directors = sorted(df['DIRECTOR'].dropna().unique().tolist()) if not df.empty else []
+        actors1 = sorted(df['ACTOR 1'].dropna().unique().tolist()) if not df.empty else []
+        actors2 = sorted(df['ACTOR 2'].dropna().unique().tolist()) if not df.empty else []
 
         # 中英文映射
         model_map = {
@@ -289,9 +298,9 @@ def run_streamlit_app(predictor):
                 votes = st.number_input("投票数", value=100000)
                 certificate = st.selectbox("分级", ["G", "PG", "PG-13", "R", "unknown"])
             with col3:
-                director = st.selectbox("导演", directors)
-                actor1 = st.selectbox("主演1", actors1)
-                actor2 = st.selectbox("主演2", actors2)
+                director = st.selectbox("导演", directors) if directors else st.text_input("导演", "未知导演")
+                actor1 = st.selectbox("主演1", actors1) if actors1 else st.text_input("主演1", "未知演员")
+                actor2 = st.selectbox("主演2", actors2) if actors2 else st.text_input("主演2", "未知演员")
 
             genre = st.multiselect("电影类型", ["Action", "Adventure", "Animation", "Comedy", "Crime", "Drama", "Fantasy", "Horror", "Romance", "Sci-Fi", "Thriller"])
             submit = st.form_submit_button("开始预测")
@@ -314,45 +323,37 @@ def run_streamlit_app(predictor):
                 data["genre"] = [genre]
                 input_df = pd.DataFrame(data)
 
+                # 标签编码转换 + 未知类别兜底
                 if predictor.le:
-                    if certificate not in predictor.le.classes_:
-                        default_label = "unknown" if "unknown" in predictor.le.classes_ else predictor.le.classes_[0]
-                        input_df['certificate'] = predictor.le.transform([default_label])[0]
-                    else:
-                        input_df['certificate'] = predictor.le.transform(input_df['certificate'].astype(str))
-                    
-                    if director not in predictor.le.classes_:
-                        default_dir = "未知导演" if "未知导演" in predictor.le.classes_ else predictor.le.classes_[0]
-                        input_df['DIRECTOR'] = predictor.le.transform([default_dir])[0]
-                    else:
-                        input_df['DIRECTOR'] = predictor.le.transform(input_df['DIRECTOR'].astype(str))
+                    cert_classes = list(predictor.le.classes_)
+                    dir_classes = list(predictor.le.classes_)
+                    act_classes = list(predictor.le.classes_)
 
-                    if actor1 not in predictor.le.classes_:
-                        default_act = "未知演员" if "未知演员" in predictor.le.classes_ else predictor.le.classes_[0]
-                        input_df['ACTOR 1'] = predictor.le.transform([default_act])[0]
-                    else:
-                        input_df['ACTOR 1'] = predictor.le.transform(input_df['ACTOR 1'].astype(str))
+                    def safe_transform(val, classes, default):
+                        return predictor.le.transform([val])[0] if val in classes else predictor.le.transform([default])[0]
 
-                    if actor2 not in predictor.le.classes_:
-                        default_act2 = "未知演员" if "未知演员" in predictor.le.classes_ else predictor.le.classes_[0]
-                        input_df['ACTOR 2'] = predictor.le.transform([default_act2])[0]
-                    else:
-                        input_df['ACTOR 2'] = predictor.le.transform(input_df['ACTOR 2'].astype(str))
+                    input_df['certificate'] = safe_transform(certificate, cert_classes, "unknown")
+                    input_df['DIRECTOR'] = safe_transform(director, dir_classes, "未知导演")
+                    input_df['ACTOR 1'] = safe_transform(actor1, act_classes, "未知演员")
+                    input_df['ACTOR 2'] = safe_transform(actor2, act_classes, "未知演员")
                 else:
                     input_df['certificate'] = 0
                     input_df['DIRECTOR'] = 0
                     input_df['ACTOR 1'] = 0
                     input_df['ACTOR 2'] = 0
 
+                # 多标签二值化
                 if predictor.mlb:
                     genre_arr = predictor.mlb.transform(input_df['genre'])
                     genre_df = pd.DataFrame(genre_arr, columns=predictor.mlb.classes_)
                     input_df = pd.concat([input_df.drop('genre', axis=1), genre_df], axis=1)
                 else:
-                    for col in predictor.feature_columns:
-                        if col not in input_df.columns:
-                            input_df[col] = 0
+                    if predictor.feature_columns:
+                        for col in predictor.feature_columns:
+                            if col not in input_df.columns:
+                                input_df[col] = 0
 
+                # 对齐特征列
                 if predictor.feature_columns:
                     input_df = input_df[predictor.feature_columns]
                 input_df = input_df.astype(float)
@@ -371,80 +372,84 @@ def run_streamlit_app(predictor):
         st.title("📊 电影票房数据分析")
         st.write("以下是电影数据的可视化分析图表，帮助你理解票房的影响因素")
 
-        df = pd.read_csv("电影数据.csv")
-        df.columns = [c.strip() for c in df.columns]
-        df['GROSS COLLECTION'] = df['GROSS COLLECTION'].apply(parse_gross)
-        df = df.dropna(subset=['GROSS COLLECTION']).reset_index(drop=True)
-        df['Year'] = df['Year'].apply(extract_year)
-        df['runtime'] = df.astype(str)['runtime'].str.replace(' min', '').astype(float)
-        df['votes'] = df.astype(str)['votes'].str.replace(',', '').astype(float)
+        csv_path = "电影数据.csv"
+        if not os.path.exists(csv_path):
+            st.error("未找到电影数据文件，无法展示分析图表")
+        else:
+            df = pd.read_csv(csv_path)
+            df.columns = [c.strip() for c in df.columns]
+            df['GROSS COLLECTION'] = df['GROSS COLLECTION'].apply(parse_gross)
+            df = df.dropna(subset=['GROSS COLLECTION']).reset_index(drop=True)
+            df['Year'] = df['Year'].apply(extract_year)
+            df['runtime'] = df.astype(str)['runtime'].str.replace(' min', '').astype(float)
+            df['votes'] = df.astype(str)['votes'].str.replace(',', '').astype(float)
 
-        # 1. 年份票房趋势
-        st.subheader("1. 电影票房随年份变化趋势：呈现出长期增长、阶段性波动、头部效应加剧的趋势")
-        year_gross = df.groupby('Year')['GROSS COLLECTION'].mean().dropna()
-        st.line_chart(year_gross)
+            # 1. 年份票房趋势
+            st.subheader("1. 电影票房随年份变化趋势：呈现出长期增长、阶段性波动、头部效应加剧的趋势")
+            year_gross = df.groupby('Year')['GROSS COLLECTION'].mean().dropna()
+            st.line_chart(year_gross)
 
-        # 2. 评分与票房
-        st.subheader("2. 电影评分与票房关系：评分与票房之间存在弱正相关关系，票房较高的电影普遍集中在 7.5-8.5 分的中等偏上区间，而评分超过 9.0 分的电影票房上限反而有所下降")
-        scatter_df = df[['RATING', 'GROSS COLLECTION']].dropna()
-        st.scatter_chart(scatter_df, x='RATING', y='GROSS COLLECTION')
+            # 2. 评分与票房
+            st.subheader("2. 电影评分与票房关系：评分与票房之间存在弱正相关关系，票房较高的电影普遍集中在 7.5-8.5 分的中等偏上区间，而评分超过 9.0 分的电影票房上限反而有所下降")
+            scatter_df = df[['RATING', 'GROSS COLLECTION']].dropna()
+            st.scatter_chart(scatter_df, x='RATING', y='GROSS COLLECTION')
 
-        # 3. 电影类型平均票房
-        st.subheader("3. 不同类型电影的平均票房：冒险类影片平均票房最高")
-        def split_genre(x):
-            return str(x).split(',')
-        df['genre_list'] = df['genre'].apply(split_genre)
-        genre_gross = {}
-        for idx, row in df.iterrows():
-            gross = row['GROSS COLLECTION']
-            for g in row['genre_list']:
-                if g not in genre_gross:
-                    genre_gross[g] = []
-                genre_gross[g].append(gross)
-        genre_avg = {k: np.mean(v) for k, v in genre_gross.items() if k != "nan"}
-        genre_df = pd.DataFrame(list(genre_avg.items()), columns=['类型', '平均票房'])
-        st.bar_chart(genre_df.set_index('类型'))
+            # 3. 电影类型平均票房
+            st.subheader("3. 不同类型电影的平均票房：冒险类影片平均票房最高")
+            def split_genre(x):
+                return str(x).split(',')
+            df['genre_list'] = df['genre'].apply(split_genre)
+            genre_gross = {}
+            for idx, row in df.iterrows():
+                gross = row['GROSS COLLECTION']
+                for g in row['genre_list']:
+                    if g not in genre_gross:
+                        genre_gross[g] = []
+                    genre_gross[g].append(gross)
+            genre_avg = {k: np.mean(v) for k, v in genre_gross.items() if k != "nan"}
+            genre_df = pd.DataFrame(list(genre_avg.items()), columns=['类型', '平均票房'])
+            st.bar_chart(genre_df.set_index('类型'))
 
-        # 4. 导演Top10
-        st.subheader("4. 导演Top10平均票房：Jon Watts导演作品平均票房最高")
-        director_gross = df.groupby('DIRECTOR')['GROSS COLLECTION'].mean().sort_values(ascending=False).head(10)
-        st.bar_chart(director_gross)
+            # 4. 导演Top10
+            st.subheader("4. 导演Top10平均票房：Jon Watts导演作品平均票房最高")
+            director_gross = df.groupby('DIRECTOR')['GROSS COLLECTION'].mean().sort_values(ascending=False).head(10)
+            st.bar_chart(director_gross)
 
-        # 5. 电影时长 & 票房关系
-        st.subheader("5. 电影时长 与 票房收入关系：100–180 分钟为票房黄金区间")
-        runtime_gross_df = df[['runtime', 'GROSS COLLECTION']].dropna()
-        st.scatter_chart(runtime_gross_df, x='runtime', y='GROSS COLLECTION')
+            # 5. 电影时长 & 票房关系
+            st.subheader("5. 电影时长 与 票房收入关系：100–180 分钟为票房黄金区间")
+            runtime_gross_df = df[['runtime', 'GROSS COLLECTION']].dropna()
+            st.scatter_chart(runtime_gross_df, x='runtime', y='GROSS COLLECTION')
 
-        # 6. MPAA分级数量分布
-        st.subheader("6. MPAA电影分级整体数量分布")
-        mpaa_count = df['certificate'].value_counts().dropna()
-        st.bar_chart(mpaa_count)
+            # 6. MPAA分级数量分布
+            st.subheader("6. MPAA电影分级整体数量分布")
+            mpaa_count = df['certificate'].value_counts().dropna()
+            st.bar_chart(mpaa_count)
 
-        # 7. MPAA分级 & 电影时长箱线图（修复中文乱码）
-        st.subheader("7. MPAA分级 与 电影时长分布：大部分影片时长集中在110–135分钟")
-        mpaa_runtime_df = df[['certificate', 'runtime']].dropna()
-        fig, ax = plt.subplots(figsize=(10, 6))
-        mpaa_runtime_df.boxplot(by='certificate', column='runtime', ax=ax)
-        ax.set_title('MPAA分级 与 电影时长分布', fontproperties=plt.rcParams['font.sans-serif'][0])
-        ax.set_xlabel('MPAA分级', fontproperties=plt.rcParams['font.sans-serif'][0])
-        ax.set_ylabel('电影时长(分钟)', fontproperties=plt.rcParams['font.sans-serif'][0])
-        plt.suptitle('')
-        st.pyplot(fig)
-        plt.close(fig)
+            # 7. MPAA分级 & 电影时长箱线图（全局字体统一，无乱码）
+            st.subheader("7. MPAA分级 与 电影时长分布：大部分影片时长集中在110–135分钟")
+            mpaa_runtime_df = df[['certificate', 'runtime']].dropna()
+            fig, ax = plt.subplots(figsize=(10, 6))
+            mpaa_runtime_df.boxplot(by='certificate', column='runtime', ax=ax)
+            ax.set_title('MPAA分级 与 电影时长分布', fontproperties=GLOBAL_FONT)
+            ax.set_xlabel('MPAA分级', fontproperties=GLOBAL_FONT)
+            ax.set_ylabel('电影时长(分钟)', fontproperties=GLOBAL_FONT)
+            plt.suptitle('')
+            st.pyplot(fig)
+            plt.close(fig)
 
-        # 8. MPAA分级 & 票房箱线图（修复中文乱码）
-        st.subheader("8. MPAA分级 与 电影票房收入分布：12A分级影片整体票房表现最优")
-        mpaa_gross_df = df[['certificate', 'GROSS COLLECTION']].dropna()
-        fig, ax = plt.subplots(figsize=(10, 6))
-        mpaa_gross_df.boxplot(by='certificate', column='GROSS COLLECTION', ax=ax)
-        ax.set_title('MPAA分级 与 电影票房收入分布', fontproperties=plt.rcParams['font.sans-serif'][0])
-        ax.set_xlabel('MPAA分级', fontproperties=plt.rcParams['font.sans-serif'][0])
-        ax.set_ylabel('票房收入(元)', fontproperties=plt.rcParams['font.sans-serif'][0])
-        plt.suptitle('')
-        st.pyplot(fig)
-        plt.close(fig)
+            # 8. MPAA分级 & 票房箱线图（全局字体统一，无乱码）
+            st.subheader("8. MPAA分级 与 电影票房收入分布：12A分级影片整体票房表现最优")
+            mpaa_gross_df = df[['certificate', 'GROSS COLLECTION']].dropna()
+            fig, ax = plt.subplots(figsize=(10, 6))
+            mpaa_gross_df.boxplot(by='certificate', column='GROSS COLLECTION', ax=ax)
+            ax.set_title('MPAA分级 与 电影票房收入分布', fontproperties=GLOBAL_FONT)
+            ax.set_xlabel('MPAA分级', fontproperties=GLOBAL_FONT)
+            ax.set_ylabel('票房收入(元)', fontproperties=GLOBAL_FONT)
+            plt.suptitle('')
+            st.pyplot(fig)
+            plt.close(fig)
 
-        st.info("💡 提示：所有图表数据均来自电影数据集，可根据需要拓展分析维度")
+            st.info("💡 提示：所有图表数据均来自电影数据集，可根据需要拓展分析维度")
 
 # ===================== 程序入口 =====================
 if __name__ == "__main__":
@@ -459,8 +464,8 @@ if __name__ == "__main__":
         "stacking_model.pkl"
     ]
     has_model = any(os.path.exists(f) for f in all_model_files)
-
     CSV_FILE = "电影数据.csv"
+
     if has_model:
         print("✅ 检测到已有模型，直接加载...")
         predictor.load_models()
