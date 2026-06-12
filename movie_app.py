@@ -16,10 +16,6 @@ import os
 import warnings
 warnings.filterwarnings("ignore")
 
-# 设置matplotlib中文字体，避免中文乱码
-plt.rcParams['font.sans-serif'] = ['SimHei', 'WenQuanYi Micro Hei']
-plt.rcParams['axes.unicode_minus'] = False
-
 # ===================== 模型预测类 =====================
 class MovieBoxOfficePredictor:
     def __init__(self):
@@ -235,6 +231,11 @@ def run_streamlit_app(predictor):
         </style>
     """, unsafe_allow_html=True)
 
+    # 全局修复 Matplotlib 中文乱码（适配本地 + Streamlit Cloud）
+    plt.rcParams['font.sans-serif'] = ['WenQuanYi Micro Hei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans']
+    plt.rcParams['axes.unicode_minus'] = False
+    plt.rcParams.update()
+
     st.markdown('<div class="header">基于Python的电影票房分析预测系统</div>', unsafe_allow_html=True)
     menu = ["首页", "票房分析", "票房预测"]
     choice = st.sidebar.selectbox("导航", menu)
@@ -264,7 +265,7 @@ def run_streamlit_app(predictor):
         actors1 = sorted(df['ACTOR 1'].dropna().unique().tolist())
         actors2 = sorted(df['ACTOR 2'].dropna().unique().tolist())
 
-        # 中英文映射：前端显示中文，后端调用原英文模型名
+        # 中英文映射
         model_map = {
             "多元线性回归模型": "linear_regression",
             "Ridge回归模型": "ridge_regression",
@@ -273,9 +274,7 @@ def run_streamlit_app(predictor):
             "决策树回归模型": "gradient_boosting",
             "Stacking融合模型": "stacking_model"
         }
-        # 下拉框展示中文模型名称
         select_cn = st.selectbox("请选择预测模型", list(model_map.keys()))
-        # 转换为后端识别的英文名称
         select_model = model_map[select_cn]
 
         with st.form("prediction_form"):
@@ -315,14 +314,12 @@ def run_streamlit_app(predictor):
                 input_df = pd.DataFrame(data)
 
                 if predictor.le:
-                    # 修复1：使用 predictor.le.classes_ 而不是 predictor.le.classes
                     if certificate not in predictor.le.classes_:
                         default_label = "unknown" if "unknown" in predictor.le.classes_ else predictor.le.classes_[0]
                         input_df['certificate'] = predictor.le.transform([default_label])[0]
                     else:
                         input_df['certificate'] = predictor.le.transform(input_df['certificate'].astype(str))
                     
-                    # 修复2：修正 director 部分的逻辑
                     if director not in predictor.le.classes_:
                         default_dir = "未知导演" if "未知导演" in predictor.le.classes_ else predictor.le.classes_[0]
                         input_df['DIRECTOR'] = predictor.le.transform([default_dir])[0]
@@ -335,7 +332,6 @@ def run_streamlit_app(predictor):
                     else:
                         input_df['ACTOR 1'] = predictor.le.transform(input_df['ACTOR 1'].astype(str))
 
-                    # 修复3：修正 actor2 部分的逻辑
                     if actor2 not in predictor.le.classes_:
                         default_act2 = "未知演员" if "未知演员" in predictor.le.classes_ else predictor.le.classes_[0]
                         input_df['ACTOR 2'] = predictor.le.transform([default_act2])[0]
@@ -362,7 +358,6 @@ def run_streamlit_app(predictor):
 
                 pred_log = predictor.predict_by_model(input_df.values, select_model)
                 pred_real = np.expm1(pred_log[0])
-                # 提示语使用中文模型名
                 st.success(f"当前使用模型：{select_cn}")
                 st.markdown(f"### 预测票房：:red[{pred_real:.0f}] 元")
             except Exception as e:
@@ -414,16 +409,17 @@ def run_streamlit_app(predictor):
         director_gross = df.groupby('DIRECTOR')['GROSS COLLECTION'].mean().sort_values(ascending=False).head(10)
         st.bar_chart(director_gross)
 
-        # ========== 新增：电影时长 & 票房关系 ==========
+        # 5. 电影时长 & 票房关系
         st.subheader("5. 电影时长 与 票房收入关系：100–180 分钟为票房黄金区间")
         runtime_gross_df = df[['runtime', 'GROSS COLLECTION']].dropna()
         st.scatter_chart(runtime_gross_df, x='runtime', y='GROSS COLLECTION')
 
-        # ========== 新增：MPAA分级（certificate）相关分析 ==========
+        # 6. MPAA分级数量分布
         st.subheader("6. MPAA电影分级整体数量分布")
         mpaa_count = df['certificate'].value_counts().dropna()
         st.bar_chart(mpaa_count)
 
+        # 7. MPAA分级 & 电影时长箱线图
         st.subheader("7. MPAA分级 与 电影时长分布：大部分影片时长集中在110–135分钟")
         mpaa_runtime_df = df[['certificate', 'runtime']].dropna()
         fig, ax = plt.subplots(figsize=(10, 6))
@@ -435,6 +431,7 @@ def run_streamlit_app(predictor):
         st.pyplot(fig)
         plt.close(fig)
 
+        # 8. MPAA分级 & 票房箱线图
         st.subheader("8. MPAA分级 与 电影票房收入分布：12A分级影片整体票房表现最优")
         mpaa_gross_df = df[['certificate', 'GROSS COLLECTION']].dropna()
         fig, ax = plt.subplots(figsize=(10, 6))
@@ -450,10 +447,8 @@ def run_streamlit_app(predictor):
 
 # ===================== 程序入口 =====================
 if __name__ == "__main__":
-    # 实例化预测器
     predictor = MovieBoxOfficePredictor()
 
-    # 检查模型文件
     all_model_files = [
         "linear_regression.pkl",
         "ridge_regression.pkl",
@@ -481,6 +476,5 @@ if __name__ == "__main__":
         else:
             print("❌ 未找到 电影数据.csv，进入模拟预测模式")
 
-    # 启动网页
     print("🚀 启动电影票房系统...")
     run_streamlit_app(predictor)
