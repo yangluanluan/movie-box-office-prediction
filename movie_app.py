@@ -6,6 +6,7 @@ import pandas as pd
 import numpy as np
 import re
 import matplotlib.pyplot as plt
+import matplotlib.font_manager as fm
 from sklearn.model_selection import KFold, train_test_split
 from sklearn.linear_model import LinearRegression, Ridge, Lasso
 from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
@@ -13,12 +14,28 @@ from sklearn.metrics import mean_squared_error, r2_score
 from sklearn.preprocessing import LabelEncoder, MultiLabelBinarizer
 import joblib
 import os
+import sys
 import warnings
 warnings.filterwarnings("ignore")
 
-# 设置matplotlib中文字体，避免中文乱码
-plt.rcParams['font.sans-serif'] = ['SimHei', 'WenQuanYi Micro Hei']
-plt.rcParams['axes.unicode_minus'] = False
+# ===================== 动态加载中文字体（本地 + Streamlit 云端通用）=====================
+def set_matplotlib_font():
+    # 适配 Windows / Mac / Linux(Streamlit云)
+    if sys.platform.startswith("win"):
+        font_path = "C:/Windows/Fonts/simhei.ttf"
+    elif sys.platform == "darwin":
+        font_path = "/Library/Fonts/PingFang.ttc"
+    else:
+        # Streamlit 云环境固定字体路径
+        font_path = "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc"
+
+    global font_prop
+    font_prop = fm.FontProperties(fname=font_path)
+    plt.rcParams["font.sans-serif"] = [font_prop.get_name()]
+    plt.rcParams["axes.unicode_minus"] = False
+
+# 执行字体初始化
+set_matplotlib_font()
 
 # ===================== 模型预测类 =====================
 class MovieBoxOfficePredictor:
@@ -275,17 +292,15 @@ def run_streamlit_app(predictor):
         # ========== 新增：模型性能对比图表 ==========
         st.subheader("各机器学习模型预测性能对比（RMSE）")
         if predictor.model_scores and predictor.stacking_test_rmse is not None:
-            # 修正中文名称：梯度提升回归，不再是错误的决策树回归
             model_names_cn = [
                 "线性回归",
                 "决策树回归",
                 "Ridge 回归",
                 "Lasso回归",
                 "随机森林回归",
-                "模型融合"
+                "Stacking模型融合"
             ]
             try:
-                # 提取对应模型CV平均RMSE
                 lr_rmse = predictor.model_scores["linear_regression"]["mean_cv_rmse"]
                 gbr_rmse = predictor.model_scores["gradient_boosting"]["mean_cv_rmse"]
                 ridge_rmse = predictor.model_scores["ridge_regression"]["mean_cv_rmse"]
@@ -295,15 +310,17 @@ def run_streamlit_app(predictor):
 
                 rmse_data = [lr_rmse, gbr_rmse, ridge_rmse, lasso_rmse, rf_rmse, stack_rmse]
 
-                # 绘制和原图风格一致的柱状图
+                # 绘图并指定中文字体
                 fig, ax = plt.subplots(figsize=(10, 5), dpi=100)
                 bars = ax.bar(model_names_cn, rmse_data, color='#642EFE')
-                ax.set_title("机器学习电影票房预测性能对比", fontsize=14)
-                ax.set_ylabel("rmse")
-                ax.set_xlabel("model")
-                # 已删除固定Y轴限制 ax.set_ylim(0.2, 0.35)
+                ax.set_title("机器学习电影票房预测性能对比", fontproperties=font_prop, fontsize=14)
+                ax.set_ylabel("rmse", fontproperties=font_prop)
+                ax.set_xlabel("model", fontproperties=font_prop)
 
-                # 柱子上方标注数值（动态间距）
+                # 坐标轴刻度字体
+                plt.xticks(fontproperties=font_prop)
+                plt.yticks(fontproperties=font_prop)
+
                 offset = max(rmse_data) * 0.01
                 for bar, val in zip(bars, rmse_data):
                     height = bar.get_height()
@@ -313,6 +330,7 @@ def run_streamlit_app(predictor):
                         f"{val:.4f}",
                         ha="center",
                         va="bottom",
+                        fontproperties=font_prop,
                         fontsize=11
                     )
                 plt.tight_layout()
@@ -383,14 +401,12 @@ def run_streamlit_app(predictor):
                 input_df = pd.DataFrame(data)
 
                 if predictor.le:
-                    # 修复1：使用 predictor.le.classes_ 而不是 predictor.le.classes
                     if certificate not in predictor.le.classes_:
                         default_label = "unknown" if "unknown" in predictor.le.classes_ else predictor.le.classes_[0]
                         input_df['certificate'] = predictor.le.transform([default_label])[0]
                     else:
                         input_df['certificate'] = predictor.le.transform(input_df['certificate'].astype(str))
                     
-                    # 修复2：修正 director 部分的逻辑
                     if director not in predictor.le.classes_:
                         default_dir = "未知导演" if "未知导演" in predictor.le.classes_ else predictor.le.classes_[0]
                         input_df['DIRECTOR'] = predictor.le.transform([default_dir])[0]
@@ -403,7 +419,6 @@ def run_streamlit_app(predictor):
                     else:
                         input_df['ACTOR 1'] = predictor.le.transform(input_df['ACTOR 1'].astype(str))
 
-                    # 修复3：修正 actor2 部分的逻辑
                     if actor2 not in predictor.le.classes_:
                         default_act2 = "未知演员" if "未知演员" in predictor.le.classes_ else predictor.le.classes_[0]
                         input_df['ACTOR 2'] = predictor.le.transform([default_act2])[0]
@@ -430,7 +445,6 @@ def run_streamlit_app(predictor):
 
                 pred_log = predictor.predict_by_model(input_df.values, select_model)
                 pred_real = np.expm1(pred_log[0])
-                # 提示语使用中文模型名
                 st.success(f"当前使用模型：{select_cn}")
                 st.markdown(f"### 预测票房：:red[{pred_real:.0f}] 元")
             except Exception as e:
@@ -496,9 +510,11 @@ def run_streamlit_app(predictor):
         mpaa_runtime_df = df[['certificate', 'runtime']].dropna()
         fig, ax = plt.subplots(figsize=(10, 6))
         mpaa_runtime_df.boxplot(by='certificate', column='runtime', ax=ax)
-        ax.set_title('MPAA Rating vs Movie Runtime Distribution')
-        ax.set_xlabel('MPAA Rating')
-        ax.set_ylabel('Movie Runtime (Minutes)')
+        ax.set_title('MPAA Rating vs Movie Runtime Distribution', fontproperties=font_prop)
+        ax.set_xlabel('MPAA Rating', fontproperties=font_prop)
+        ax.set_ylabel('Movie Runtime (Minutes)', fontproperties=font_prop)
+        plt.xticks(fontproperties=font_prop)
+        plt.yticks(fontproperties=font_prop)
         plt.suptitle('')
         st.pyplot(fig)
         plt.close(fig)
@@ -507,9 +523,11 @@ def run_streamlit_app(predictor):
         mpaa_gross_df = df[['certificate', 'GROSS COLLECTION']].dropna()
         fig, ax = plt.subplots(figsize=(10, 6))
         mpaa_gross_df.boxplot(by='certificate', column='GROSS COLLECTION', ax=ax)
-        ax.set_title('MPAA Rating vs Movie Box Office Distribution')
-        ax.set_xlabel('MPAA Rating')
-        ax.set_ylabel('Box Office Revenue (USD)')
+        ax.set_title('MPAA Rating vs Movie Box Office Distribution', fontproperties=font_prop)
+        ax.set_xlabel('MPAA Rating', fontproperties=font_prop)
+        ax.set_ylabel('Box Office Revenue (USD)', fontproperties=font_prop)
+        plt.xticks(fontproperties=font_prop)
+        plt.yticks(fontproperties=font_prop)
         plt.suptitle('')
         st.pyplot(fig)
         plt.close(fig)
