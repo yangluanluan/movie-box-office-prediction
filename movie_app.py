@@ -428,7 +428,7 @@ def run_streamlit_app(predictor):
                 "Ridge 回归",
                 "Lasso回归",
                 "随机森林回归",
-                "模型融合"
+                "Stacking模型融合"
             ]
             try:
                 lr_rmse = predictor.model_scores["linear_regression"]["mean_cv_rmse"]
