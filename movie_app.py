@@ -1,12 +1,12 @@
 # 依赖安装（首次运行执行）
-# pip install streamlit pandas numpy scikit-learn joblib matplotlib
+# pip install streamlit pandas numpy scikit-learn joblib plotly
 
 import streamlit as st
 import pandas as pd
 import numpy as np
 import re
-import matplotlib.pyplot as plt
-import matplotlib.font_manager as fm
+import plotly.express as px
+import plotly.graph_objects as go
 from sklearn.model_selection import KFold, train_test_split
 from sklearn.linear_model import LinearRegression, Ridge, Lasso
 from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
@@ -14,28 +14,8 @@ from sklearn.metrics import mean_squared_error, r2_score
 from sklearn.preprocessing import LabelEncoder, MultiLabelBinarizer
 import joblib
 import os
-import sys
 import warnings
 warnings.filterwarnings("ignore")
-
-# ===================== 强制加载中文字体（Streamlit 云环境专用）=====================
-# 不再依赖 rcParams，直接加载字体文件，绘图时强制指定
-def get_chinese_font():
-    # Streamlit 云环境自带的文泉驿字体路径（固定不变）
-    font_path = "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc"
-    if os.path.exists(font_path):
-        return fm.FontProperties(fname=font_path)
-    # 本地环境 fallback
-    if sys.platform.startswith("win"):
-        return fm.FontProperties(fname="C:/Windows/Fonts/simhei.ttf")
-    elif sys.platform == "darwin":
-        return fm.FontProperties(fname="/Library/Fonts/PingFang.ttc")
-    # 兜底方案
-    return None
-
-# 全局字体对象，后续所有绘图都用它
-chinese_font = get_chinese_font()
-plt.rcParams['axes.unicode_minus'] = False
 
 # ===================== 模型预测类 =====================
 class MovieBoxOfficePredictor:
@@ -304,32 +284,19 @@ def run_streamlit_app(predictor):
 
                 rmse_data = [lr_rmse, gbr_rmse, ridge_rmse, lasso_rmse, rf_rmse, stack_rmse]
 
-                # ========== 关键修改：绘图时强制指定中文字体 ==========
-                fig, ax = plt.subplots(figsize=(10, 5), dpi=100)
-                bars = ax.bar(model_names_cn, rmse_data, color='#642EFE')
-                
-                # 所有中文元素都加上 fontproperties=chinese_font
-                ax.set_title("机器学习电影票房预测性能对比", fontsize=14, fontproperties=chinese_font)
-                ax.set_ylabel("rmse", fontproperties=chinese_font)
-                ax.set_xlabel("model", fontproperties=chinese_font)
-                plt.xticks(fontproperties=chinese_font)  # X轴标签强制指定字体
-                plt.yticks(fontproperties=chinese_font)  # Y轴标签也加上
+                # Plotly 柱状图
+                fig_bar = px.bar(
+                    x=model_names_cn,
+                    y=rmse_data,
+                    color_discrete_sequence=['#642EFE'],
+                    title="机器学习电影票房预测性能对比",
+                    labels={"x": "模型", "y": "RMSE"}
+                )
+                # 显示数值标签
+                fig_bar.update_traces(texttemplate='%{y:.4f}', textposition='outside')
+                fig_bar.update_layout(height=400)
+                st.plotly_chart(fig_bar, use_container_width=True)
 
-                offset = max(rmse_data) * 0.01
-                for bar, val in zip(bars, rmse_data):
-                    height = bar.get_height()
-                    ax.text(
-                        bar.get_x() + bar.get_width() / 2,
-                        height + offset,
-                        f"{val:.4f}",
-                        ha="center",
-                        va="bottom",
-                        fontsize=11,
-                        fontproperties=chinese_font  # 柱子上的数字也加上
-                    )
-                plt.tight_layout()
-                st.pyplot(fig)
-                plt.close(fig)
                 st.info("提示：RMSE数值越低，模型预测误差越小，预测效果越好。模型融合（Stacking）通常具备最优性能。")
             except KeyError:
                 st.warning("模型性能指标不完整，请删除所有.pkl文件后重新完整训练模型！")
@@ -337,7 +304,7 @@ def run_streamlit_app(predictor):
             st.warning("暂无训练完成的模型性能数据，请先运行模型训练流程生成模型文件！")
         st.divider()
 
-        # 原有预测表单代码不变
+        # 预测表单
         df = pd.read_csv("电影数据.csv")
         df.columns = [c.strip() for c in df.columns]
 
@@ -457,17 +424,31 @@ def run_streamlit_app(predictor):
         df['runtime'] = df.astype(str)['runtime'].str.replace(' min', '').astype(float)
         df['votes'] = df.astype(str)['votes'].str.replace(',', '').astype(float)
 
-        # 1. 年份票房趋势
+        # 1. 年份票房趋势 - 折线图
         st.subheader("1. 电影票房随年份变化趋势：呈现出长期增长、阶段性波动、头部效应加剧的趋势")
-        year_gross = df.groupby('Year')['GROSS COLLECTION'].mean().dropna()
-        st.line_chart(year_gross)
+        year_gross = df.groupby('Year')['GROSS COLLECTION'].mean().dropna().reset_index()
+        fig_line = px.line(
+            year_gross,
+            x="Year",
+            y="GROSS COLLECTION",
+            title="历年平均票房趋势",
+            labels={"Year": "年份", "GROSS COLLECTION": "平均票房"}
+        )
+        st.plotly_chart(fig_line, use_container_width=True)
 
-        # 2. 评分与票房
-        st.subheader("2. 电影评分与票房关系：评分与票房之间存在弱正相关关系，票房较高的电影普遍集中在 7.5-8.5 分的中等偏上区间，而评分超过 9.0 分的电影票房上限反而有所下降")
+        # 2. 评分与票房 - 散点图
+        st.subheader("2. 电影评分与票房关系：评分与票房之间存在弱正相关关系，票房较高的电影普遍集中在 7.5-8.5 分区间")
         scatter_df = df[['RATING', 'GROSS COLLECTION']].dropna()
-        st.scatter_chart(scatter_df, x='RATING', y='GROSS COLLECTION')
+        fig_scatter = px.scatter(
+            scatter_df,
+            x="RATING",
+            y="GROSS COLLECTION",
+            title="评分 vs 票房",
+            labels={"RATING": "电影评分", "GROSS COLLECTION": "票房收入"}
+        )
+        st.plotly_chart(fig_scatter, use_container_width=True)
 
-        # 3. 电影类型平均票房
+        # 3. 不同类型电影平均票房
         st.subheader("3. 不同类型电影的平均票房：冒险类影片平均票房最高")
         def split_genre(x):
             return str(x).split(',')
@@ -476,55 +457,82 @@ def run_streamlit_app(predictor):
         for idx, row in df.iterrows():
             gross = row['GROSS COLLECTION']
             for g in row['genre_list']:
-                if g not in genre_gross:
-                    genre_gross[g] = []
-                genre_gross[g].append(gross)
-        genre_avg = {k: np.mean(v) for k, v in genre_gross.items() if k != "nan"}
+                g = g.strip()
+                if g and g != "nan":
+                    if g not in genre_gross:
+                        genre_gross[g] = []
+                    genre_gross[g].append(gross)
+        genre_avg = {k: np.mean(v) for k, v in genre_gross.items()}
         genre_df = pd.DataFrame(list(genre_avg.items()), columns=['类型', '平均票房'])
-        st.bar_chart(genre_df.set_index('类型'))
+        fig_genre = px.bar(
+            genre_df,
+            x="类型",
+            y="平均票房",
+            title="各电影类型平均票房",
+            color_discrete_sequence=['#4169E1']
+        )
+        st.plotly_chart(fig_genre, use_container_width=True)
 
-        # 4. 导演Top10
+        # 4. 导演Top10平均票房
         st.subheader("4. 导演Top10平均票房：Jon Watts导演作品平均票房最高")
-        director_gross = df.groupby('DIRECTOR')['GROSS COLLECTION'].mean().sort_values(ascending=False).head(10)
-        st.bar_chart(director_gross)
+        director_gross = df.groupby('DIRECTOR')['GROSS COLLECTION'].mean().sort_values(ascending=False).head(10).reset_index()
+        fig_dir = px.bar(
+            director_gross,
+            x="DIRECTOR",
+            y="GROSS COLLECTION",
+            title="Top10 导演平均票房",
+            labels={"DIRECTOR": "导演", "GROSS COLLECTION": "平均票房"},
+            color_discrete_sequence=['#2E8B57']
+        )
+        st.plotly_chart(fig_dir, use_container_width=True)
 
         # 5. 电影时长 & 票房关系
         st.subheader("5. 电影时长 与 票房收入关系：100–180 分钟为票房黄金区间")
         runtime_gross_df = df[['runtime', 'GROSS COLLECTION']].dropna()
-        st.scatter_chart(runtime_gross_df, x='runtime', y='GROSS COLLECTION')
+        fig_runtime = px.scatter(
+            runtime_gross_df,
+            x="runtime",
+            y="GROSS COLLECTION",
+            title="电影时长 vs 票房",
+            labels={"runtime": "时长(分钟)", "GROSS COLLECTION": "票房收入"}
+        )
+        st.plotly_chart(fig_runtime, use_container_width=True)
 
-        # 6. MPAA分级整体数量分布
+        # 6. MPAA分级数量分布
         st.subheader("6. MPAA电影分级整体数量分布")
-        mpaa_count = df['certificate'].value_counts().dropna()
-        st.bar_chart(mpaa_count)
+        mpaa_count = df['certificate'].value_counts().dropna().reset_index()
+        mpaa_count.columns = ["分级", "数量"]
+        fig_mpaa_cnt = px.bar(
+            mpaa_count,
+            x="分级",
+            y="数量",
+            title="各分级影片数量分布"
+        )
+        st.plotly_chart(fig_mpaa_cnt, use_container_width=True)
 
-        # 7. MPAA分级 与 电影时长分布（强制指定字体）
+        # 7. MPAA分级 & 时长 箱线图
         st.subheader("7. MPAA分级 与 电影时长分布：大部分影片时长集中在110–135分钟")
         mpaa_runtime_df = df[['certificate', 'runtime']].dropna()
-        fig, ax = plt.subplots(figsize=(10, 6))
-        mpaa_runtime_df.boxplot(by='certificate', column='runtime', ax=ax)
-        ax.set_title('MPAA Rating vs Movie Runtime Distribution', fontproperties=chinese_font)
-        ax.set_xlabel('MPAA Rating', fontproperties=chinese_font)
-        ax.set_ylabel('Movie Runtime (Minutes)', fontproperties=chinese_font)
-        plt.xticks(fontproperties=chinese_font)
-        plt.yticks(fontproperties=chinese_font)
-        plt.suptitle('')
-        st.pyplot(fig)
-        plt.close(fig)
+        fig_box1 = px.box(
+            mpaa_runtime_df,
+            x="certificate",
+            y="runtime",
+            title="分级与电影时长分布",
+            labels={"certificate": "MPAA分级", "runtime": "时长(分钟)"}
+        )
+        st.plotly_chart(fig_box1, use_container_width=True)
 
-        # 8. MPAA分级 与 电影票房收入分布（强制指定字体）
+        # 8. MPAA分级 & 票房 箱线图
         st.subheader("8. MPAA分级 与 电影票房收入分布：12A分级影片整体票房表现最优")
         mpaa_gross_df = df[['certificate', 'GROSS COLLECTION']].dropna()
-        fig, ax = plt.subplots(figsize=(10, 6))
-        mpaa_gross_df.boxplot(by='certificate', column='GROSS COLLECTION', ax=ax)
-        ax.set_title('MPAA Rating vs Movie Box Office Distribution', fontproperties=chinese_font)
-        ax.set_xlabel('MPAA Rating', fontproperties=chinese_font)
-        ax.set_ylabel('Box Office Revenue (USD)', fontproperties=chinese_font)
-        plt.xticks(fontproperties=chinese_font)
-        plt.yticks(fontproperties=chinese_font)
-        plt.suptitle('')
-        st.pyplot(fig)
-        plt.close(fig)
+        fig_box2 = px.box(
+            mpaa_gross_df,
+            x="certificate",
+            y="GROSS COLLECTION",
+            title="分级与票房收入分布",
+            labels={"certificate": "MPAA分级", "GROSS COLLECTION": "票房收入"}
+        )
+        st.plotly_chart(fig_box2, use_container_width=True)
 
         st.info("💡 提示：所有图表数据均来自电影数据集，可根据需要拓展分析维度")
 
