@@ -16,25 +16,26 @@ import joblib
 import os
 import sys
 import warnings
-import subprocess
 warnings.filterwarnings("ignore")
 
-# ===================== 自动安装并加载中文字体（Streamlit 云环境专用）=====================
-def install_and_set_font():
-    # 只在 Linux/Streamlit 云环境执行安装
-    if not sys.platform.startswith('win') and sys.platform != 'darwin':
-        # 安装文泉驿中文字体
-        subprocess.run(['apt-get', 'update', '-qq'], check=False)
-        subprocess.run(['apt-get', 'install', '-y', 'fonts-wqy-zenhei'], check=False)
-    
-    # 统一配置 Matplotlib 中文字体
-    plt.rcParams['font.sans-serif'] = ['WenQuanYi Zen Hei', 'SimHei', 'PingFang SC', 'DejaVu Sans']
-    plt.rcParams['axes.unicode_minus'] = False
-    # 直接用 rcParams，不再依赖全局 font_prop
+# ===================== 强制加载中文字体（Streamlit 云环境专用）=====================
+# 不再依赖 rcParams，直接加载字体文件，绘图时强制指定
+def get_chinese_font():
+    # Streamlit 云环境自带的文泉驿字体路径（固定不变）
+    font_path = "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc"
+    if os.path.exists(font_path):
+        return fm.FontProperties(fname=font_path)
+    # 本地环境 fallback
+    if sys.platform.startswith("win"):
+        return fm.FontProperties(fname="C:/Windows/Fonts/simhei.ttf")
+    elif sys.platform == "darwin":
+        return fm.FontProperties(fname="/Library/Fonts/PingFang.ttc")
+    # 兜底方案
     return None
 
-# 执行字体初始化
-install_and_set_font()
+# 全局字体对象，后续所有绘图都用它
+chinese_font = get_chinese_font()
+plt.rcParams['axes.unicode_minus'] = False
 
 # ===================== 模型预测类 =====================
 class MovieBoxOfficePredictor:
@@ -53,7 +54,6 @@ class MovieBoxOfficePredictor:
         self.feature_columns = None
         self.le = None
         self.mlb = None
-        # 存储stacking测试集RMSE
         self.stacking_test_rmse = None
 
     def rmse(self, y_true, y_pred):
@@ -159,9 +159,7 @@ class MovieBoxOfficePredictor:
             joblib.dump(self.le, "label_encoder.pkl")
         if self.mlb:
             joblib.dump(self.mlb, "multi_label_binarizer.pkl")
-        # 保存stacking RMSE
         joblib.dump(self.stacking_test_rmse, "stacking_rmse.pkl")
-        # 新增：保存模型交叉验证指标
         joblib.dump(self.model_scores, "model_scores.pkl")
         print("\n✅ 所有模型、性能指标和特征配置已保存")
 
@@ -175,11 +173,9 @@ class MovieBoxOfficePredictor:
         if os.path.exists(stack_path):
             self.stacking_model = joblib.load(stack_path)
             print("✅ Stacking堆叠模型加载成功")
-        # 读取stacking RMSE
         rmse_file = "stacking_rmse.pkl"
         if os.path.exists(rmse_file):
             self.stacking_test_rmse = joblib.load(rmse_file)
-        # 新增：加载模型交叉验证分数
         scores_path = "model_scores.pkl"
         if os.path.exists(scores_path):
             self.model_scores = joblib.load(scores_path)
@@ -288,7 +284,6 @@ def run_streamlit_app(predictor):
     # 票房预测页
     elif choice == "票房预测":
         st.title("电影票房预测模型")
-        # ========== 新增：模型性能对比图表 ==========
         st.subheader("各机器学习模型预测性能对比（RMSE）")
         if predictor.model_scores and predictor.stacking_test_rmse is not None:
             model_names_cn = [
@@ -309,12 +304,16 @@ def run_streamlit_app(predictor):
 
                 rmse_data = [lr_rmse, gbr_rmse, ridge_rmse, lasso_rmse, rf_rmse, stack_rmse]
 
-                # 绘图（不再需要单独指定fontproperties，因为已经全局配置）
+                # ========== 关键修改：绘图时强制指定中文字体 ==========
                 fig, ax = plt.subplots(figsize=(10, 5), dpi=100)
                 bars = ax.bar(model_names_cn, rmse_data, color='#642EFE')
-                ax.set_title("机器学习电影票房预测性能对比", fontsize=14)
-                ax.set_ylabel("rmse")
-                ax.set_xlabel("model")
+                
+                # 所有中文元素都加上 fontproperties=chinese_font
+                ax.set_title("机器学习电影票房预测性能对比", fontsize=14, fontproperties=chinese_font)
+                ax.set_ylabel("rmse", fontproperties=chinese_font)
+                ax.set_xlabel("model", fontproperties=chinese_font)
+                plt.xticks(fontproperties=chinese_font)  # X轴标签强制指定字体
+                plt.yticks(fontproperties=chinese_font)  # Y轴标签也加上
 
                 offset = max(rmse_data) * 0.01
                 for bar, val in zip(bars, rmse_data):
@@ -325,7 +324,8 @@ def run_streamlit_app(predictor):
                         f"{val:.4f}",
                         ha="center",
                         va="bottom",
-                        fontsize=11
+                        fontsize=11,
+                        fontproperties=chinese_font  # 柱子上的数字也加上
                     )
                 plt.tight_layout()
                 st.pyplot(fig)
@@ -336,7 +336,8 @@ def run_streamlit_app(predictor):
         else:
             st.warning("暂无训练完成的模型性能数据，请先运行模型训练流程生成模型文件！")
         st.divider()
-        # ========== 原有预测表单代码 ==========
+
+        # 原有预测表单代码不变
         df = pd.read_csv("电影数据.csv")
         df.columns = [c.strip() for c in df.columns]
 
@@ -344,7 +345,6 @@ def run_streamlit_app(predictor):
         actors1 = sorted(df['ACTOR 1'].dropna().unique().tolist())
         actors2 = sorted(df['ACTOR 2'].dropna().unique().tolist())
 
-        # 中英文映射：前端显示中文，后端调用原英文模型名
         model_map = {
             "多元线性回归模型": "linear_regression",
             "Ridge回归模型": "ridge_regression",
@@ -353,9 +353,7 @@ def run_streamlit_app(predictor):
             "决策树回归模型": "gradient_boosting",
             "Stacking融合模型": "stacking_model"
         }
-        # 下拉框展示中文模型名称
         select_cn = st.selectbox("请选择预测模型", list(model_map.keys()))
-        # 转换为后端识别的英文名称
         select_model = model_map[select_cn]
 
         with st.form("prediction_form"):
@@ -490,34 +488,40 @@ def run_streamlit_app(predictor):
         director_gross = df.groupby('DIRECTOR')['GROSS COLLECTION'].mean().sort_values(ascending=False).head(10)
         st.bar_chart(director_gross)
 
-        # ========== 新增：电影时长 & 票房关系 ==========
+        # 5. 电影时长 & 票房关系
         st.subheader("5. 电影时长 与 票房收入关系：100–180 分钟为票房黄金区间")
         runtime_gross_df = df[['runtime', 'GROSS COLLECTION']].dropna()
         st.scatter_chart(runtime_gross_df, x='runtime', y='GROSS COLLECTION')
 
-        # ========== 新增：MPAA分级（certificate）相关分析 ==========
+        # 6. MPAA分级整体数量分布
         st.subheader("6. MPAA电影分级整体数量分布")
         mpaa_count = df['certificate'].value_counts().dropna()
         st.bar_chart(mpaa_count)
 
+        # 7. MPAA分级 与 电影时长分布（强制指定字体）
         st.subheader("7. MPAA分级 与 电影时长分布：大部分影片时长集中在110–135分钟")
         mpaa_runtime_df = df[['certificate', 'runtime']].dropna()
         fig, ax = plt.subplots(figsize=(10, 6))
         mpaa_runtime_df.boxplot(by='certificate', column='runtime', ax=ax)
-        ax.set_title('MPAA Rating vs Movie Runtime Distribution')
-        ax.set_xlabel('MPAA Rating')
-        ax.set_ylabel('Movie Runtime (Minutes)')
+        ax.set_title('MPAA Rating vs Movie Runtime Distribution', fontproperties=chinese_font)
+        ax.set_xlabel('MPAA Rating', fontproperties=chinese_font)
+        ax.set_ylabel('Movie Runtime (Minutes)', fontproperties=chinese_font)
+        plt.xticks(fontproperties=chinese_font)
+        plt.yticks(fontproperties=chinese_font)
         plt.suptitle('')
         st.pyplot(fig)
         plt.close(fig)
 
+        # 8. MPAA分级 与 电影票房收入分布（强制指定字体）
         st.subheader("8. MPAA分级 与 电影票房收入分布：12A分级影片整体票房表现最优")
         mpaa_gross_df = df[['certificate', 'GROSS COLLECTION']].dropna()
         fig, ax = plt.subplots(figsize=(10, 6))
         mpaa_gross_df.boxplot(by='certificate', column='GROSS COLLECTION', ax=ax)
-        ax.set_title('MPAA Rating vs Movie Box Office Distribution')
-        ax.set_xlabel('MPAA Rating')
-        ax.set_ylabel('Box Office Revenue (USD)')
+        ax.set_title('MPAA Rating vs Movie Box Office Distribution', fontproperties=chinese_font)
+        ax.set_xlabel('MPAA Rating', fontproperties=chinese_font)
+        ax.set_ylabel('Box Office Revenue (USD)', fontproperties=chinese_font)
+        plt.xticks(fontproperties=chinese_font)
+        plt.yticks(fontproperties=chinese_font)
         plt.suptitle('')
         st.pyplot(fig)
         plt.close(fig)
@@ -526,10 +530,8 @@ def run_streamlit_app(predictor):
 
 # ===================== 程序入口 =====================
 if __name__ == "__main__":
-    # 实例化预测器
     predictor = MovieBoxOfficePredictor()
 
-    # 检查模型文件
     all_model_files = [
         "linear_regression.pkl",
         "ridge_regression.pkl",
@@ -558,6 +560,5 @@ if __name__ == "__main__":
         else:
             print("❌ 未找到 电影数据.csv，进入模拟预测模式")
 
-    # 启动网页
     print("🚀 启动电影票房系统...")
     run_streamlit_app(predictor)
