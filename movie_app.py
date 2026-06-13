@@ -561,7 +561,7 @@ def run_streamlit_app(predictor):
                 pred_log = predictor.predict_by_model(input_df.values, select_model)
                 pred_real = np.expm1(pred_log[0])
                 st.success(f"当前使用模型：{select_cn}")
-                st.markdown(f"### 预测票房：:red[{pred_real:.0f}] 元")
+                st.markdown(f"### 预测票房：:red[{pred_real:.0f}] 美元")
             except Exception as e:
                 st.error(f"预测异常：{str(e)}，启用模拟结果")
                 pred = 371300633
