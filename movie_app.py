@@ -268,7 +268,7 @@ def run_streamlit_app(predictor):
         if predictor.model_scores and predictor.stacking_test_rmse is not None:
             model_names_cn = [
                 "线性回归",
-                "梯度提升回归",
+                "决策树回归",
                 "Ridge 回归",
                 "Lasso回归",
                 "随机森林回归",
@@ -313,7 +313,7 @@ def run_streamlit_app(predictor):
         actors2 = sorted(df['ACTOR 2'].dropna().unique().tolist())
 
         model_map = {
-            "多元线性回归模型": "linear_regression",
+            "线性回归模型": "linear_regression",
             "Ridge回归模型": "ridge_regression",
             "Lasso回归模型": "lasso_regression",
             "随机森林回归模型": "random_forest",
