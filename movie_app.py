@@ -261,6 +261,162 @@ def run_streamlit_app(predictor):
         with col2:
             st.info("本系统已取消登录验证，可直接前往【票房预测】或【票房分析】使用功能")
 
+    # 票房分析页
+    elif choice == "票房分析":
+        st.title("📊 电影票房数据分析")
+        st.write("以下是电影数据的可视化分析图表，帮助你理解票房的影响因素")
+        st.divider()
+
+        # ========== 新增：数据集预览 + 字段说明 ==========
+        df_raw = pd.read_csv("电影数据.csv")
+        df_raw.columns = [c.strip() for c in df_raw.columns]
+
+        # 1. 数据集前10行展示
+        st.subheader("一、原始数据集预览（前10行）")
+        st.dataframe(df_raw.head(10), use_container_width=True)
+        st.caption(f"数据集总记录数：{len(df_raw)} 条")
+        st.divider()
+
+        # 2. 字段含义解释表格
+        st.subheader("二、数据字段详细说明")
+        field_info = [
+            {"字段名":"Year","中文名称":"上映年份","字段含义":"电影正式上映的年份"},
+            {"字段名":"runtime","中文名称":"影片时长","字段含义":"电影正片时长，单位：分钟"},
+            {"字段名":"certificate","中文名称":"影片分级","字段含义":"欧美MPAA电影分级（G/PG/PG-13/R等），用于划分观影人群"},
+            {"字段名":"genre","中文名称":"电影类型","字段含义":"影片题材类型，支持多类型组合，如动作、喜剧、科幻等"},
+            {"字段名":"RATING","中文名称":"大众评分","字段含义":"普通观众给出的综合评分，满分10分"},
+            {"字段名":"metascore","中文名称":"专业影评分数","字段含义":"专业影评人综合打分，满分100分"},
+            {"字段名":"votes","中文名称":"评价人数","字段含义":"参与评分、投票的用户总数量"},
+            {"字段名":"DIRECTOR","中文名称":"导演","字段含义":"电影主创导演姓名"},
+            {"字段名":"ACTOR 1","中文名称":"主演1","字段含义":"第一主演/主要演员"},
+            {"字段名":"ACTOR 2","中文名称":"主演2","字段含义":"第二主演/联合主演"},
+            {"字段名":"GROSS COLLECTION","中文名称":"总票房","字段含义":"电影全球总票房，原始单位为美元，含M（百万）、K（千）单位标识"}
+        ]
+        field_df = pd.DataFrame(field_info)
+        st.dataframe(field_df, use_container_width=True, hide_index=True)
+        st.divider()
+        # ==============================================
+
+        # 数据清洗与转换（用于图表分析）
+        df = df_raw.copy()
+        df['GROSS COLLECTION'] = df['GROSS COLLECTION'].apply(parse_gross)
+        df = df.dropna(subset=['GROSS COLLECTION']).reset_index(drop=True)
+        df['Year'] = df['Year'].apply(extract_year)
+        df['runtime'] = df.astype(str)['runtime'].str.replace(' min', '').astype(float)
+        df['votes'] = df.astype(str)['votes'].str.replace(',', '').astype(float)
+
+        # 1. 年份票房趋势 - 折线图
+        st.subheader("1. 电影票房随年份变化趋势：呈现出长期增长、阶段性波动、头部效应加剧的趋势")
+        year_gross = df.groupby('Year')['GROSS COLLECTION'].mean().dropna().reset_index()
+        fig_line = px.line(
+            year_gross,
+            x="Year",
+            y="GROSS COLLECTION",
+            title="历年平均票房趋势",
+            labels={"Year": "年份", "GROSS COLLECTION": "平均票房"}
+        )
+        st.plotly_chart(fig_line, use_container_width=True)
+
+        # 2. 评分与票房 - 散点图
+        st.subheader("2. 电影评分与票房关系：评分与票房之间存在弱正相关关系，票房较高的电影普遍集中在 7.5-8.5 分区间")
+        scatter_df = df[['RATING', 'GROSS COLLECTION']].dropna()
+        fig_scatter = px.scatter(
+            scatter_df,
+            x="RATING",
+            y="GROSS COLLECTION",
+            title="评分 vs 票房",
+            labels={"RATING": "电影评分", "GROSS COLLECTION": "票房收入"}
+        )
+        st.plotly_chart(fig_scatter, use_container_width=True)
+
+        # 3. 不同类型电影平均票房
+        st.subheader("3. 不同类型电影的平均票房：冒险类影片平均票房最高")
+        def split_genre(x):
+            return str(x).split(',')
+        df['genre_list'] = df['genre'].apply(split_genre)
+        genre_gross = {}
+        for idx, row in df.iterrows():
+            gross = row['GROSS COLLECTION']
+            for g in row['genre_list']:
+                g = g.strip()
+                if g and g != "nan":
+                    if g not in genre_gross:
+                        genre_gross[g] = []
+                    genre_gross[g].append(gross)
+        genre_avg = {k: np.mean(v) for k, v in genre_gross.items()}
+        genre_df = pd.DataFrame(list(genre_avg.items()), columns=['类型', '平均票房'])
+        fig_genre = px.bar(
+            genre_df,
+            x="类型",
+            y="平均票房",
+            title="各电影类型平均票房",
+            color_discrete_sequence=['#4169E1']
+        )
+        st.plotly_chart(fig_genre, use_container_width=True)
+
+        # 4. 导演Top10平均票房
+        st.subheader("4. 导演Top10平均票房：Jon Watts导演作品平均票房最高")
+        director_gross = df.groupby('DIRECTOR')['GROSS COLLECTION'].mean().sort_values(ascending=False).head(10).reset_index()
+        fig_dir = px.bar(
+            director_gross,
+            x="DIRECTOR",
+            y="GROSS COLLECTION",
+            title="Top10 导演平均票房",
+            labels={"DIRECTOR": "导演", "GROSS COLLECTION": "平均票房"},
+            color_discrete_sequence=['#2E8B57']
+        )
+        st.plotly_chart(fig_dir, use_container_width=True)
+
+        # 5. 电影时长 & 票房关系
+        st.subheader("5. 电影时长 与 票房收入关系：100–180 分钟为票房黄金区间")
+        runtime_gross_df = df[['runtime', 'GROSS COLLECTION']].dropna()
+        fig_runtime = px.scatter(
+            runtime_gross_df,
+            x="runtime",
+            y="GROSS COLLECTION",
+            title="电影时长 vs 票房",
+            labels={"runtime": "时长(分钟)", "GROSS COLLECTION": "票房收入"}
+        )
+        st.plotly_chart(fig_runtime, use_container_width=True)
+
+        # 6. MPAA分级数量分布
+        st.subheader("6. MPAA电影分级整体数量分布")
+        mpaa_count = df['certificate'].value_counts().dropna().reset_index()
+        mpaa_count.columns = ["分级", "数量"]
+        fig_mpaa_cnt = px.bar(
+            mpaa_count,
+            x="分级",
+            y="数量",
+            title="各分级影片数量分布"
+        )
+        st.plotly_chart(fig_mpaa_cnt, use_container_width=True)
+
+        # 7. MPAA分级 & 时长 箱线图
+        st.subheader("7. MPAA分级 与 电影时长分布：大部分影片时长集中在110–135分钟")
+        mpaa_runtime_df = df[['certificate', 'runtime']].dropna()
+        fig_box1 = px.box(
+            mpaa_runtime_df,
+            x="certificate",
+            y="runtime",
+            title="分级与电影时长分布",
+            labels={"certificate": "MPAA分级", "runtime": "时长(分钟)"}
+        )
+        st.plotly_chart(fig_box1, use_container_width=True)
+
+        # 8. MPAA分级 & 票房 箱线图
+        st.subheader("8. MPAA分级 与 电影票房收入分布：12A分级影片整体票房表现最优")
+        mpaa_gross_df = df[['certificate', 'GROSS COLLECTION']].dropna()
+        fig_box2 = px.box(
+            mpaa_gross_df,
+            x="certificate",
+            y="GROSS COLLECTION",
+            title="分级与票房收入分布",
+            labels={"certificate": "MPAA分级", "GROSS COLLECTION": "票房收入"}
+        )
+        st.plotly_chart(fig_box2, use_container_width=True)
+
+        st.info("💡 提示：所有图表数据均来自电影数据集，可根据需要拓展分析维度")
+
     # 票房预测页
     elif choice == "票房预测":
         st.title("电影票房预测模型")
@@ -410,131 +566,6 @@ def run_streamlit_app(predictor):
                 st.error(f"预测异常：{str(e)}，启用模拟结果")
                 pred = 371300633
                 st.markdown(f"### 模拟预测票房：:red[{pred}] 万元")
-
-    # 票房分析页
-    elif choice == "票房分析":
-        st.title("📊 电影票房数据分析")
-        st.write("以下是电影数据的可视化分析图表，帮助你理解票房的影响因素")
-
-        df = pd.read_csv("电影数据.csv")
-        df.columns = [c.strip() for c in df.columns]
-        df['GROSS COLLECTION'] = df['GROSS COLLECTION'].apply(parse_gross)
-        df = df.dropna(subset=['GROSS COLLECTION']).reset_index(drop=True)
-        df['Year'] = df['Year'].apply(extract_year)
-        df['runtime'] = df.astype(str)['runtime'].str.replace(' min', '').astype(float)
-        df['votes'] = df.astype(str)['votes'].str.replace(',', '').astype(float)
-
-        # 1. 年份票房趋势 - 折线图
-        st.subheader("1. 电影票房随年份变化趋势：呈现出长期增长、阶段性波动、头部效应加剧的趋势")
-        year_gross = df.groupby('Year')['GROSS COLLECTION'].mean().dropna().reset_index()
-        fig_line = px.line(
-            year_gross,
-            x="Year",
-            y="GROSS COLLECTION",
-            title="历年平均票房趋势",
-            labels={"Year": "年份", "GROSS COLLECTION": "平均票房"}
-        )
-        st.plotly_chart(fig_line, use_container_width=True)
-
-        # 2. 评分与票房 - 散点图
-        st.subheader("2. 电影评分与票房关系：评分与票房之间存在弱正相关关系，票房较高的电影普遍集中在 7.5-8.5 分区间")
-        scatter_df = df[['RATING', 'GROSS COLLECTION']].dropna()
-        fig_scatter = px.scatter(
-            scatter_df,
-            x="RATING",
-            y="GROSS COLLECTION",
-            title="评分 vs 票房",
-            labels={"RATING": "电影评分", "GROSS COLLECTION": "票房收入"}
-        )
-        st.plotly_chart(fig_scatter, use_container_width=True)
-
-        # 3. 不同类型电影平均票房
-        st.subheader("3. 不同类型电影的平均票房：冒险类影片平均票房最高")
-        def split_genre(x):
-            return str(x).split(',')
-        df['genre_list'] = df['genre'].apply(split_genre)
-        genre_gross = {}
-        for idx, row in df.iterrows():
-            gross = row['GROSS COLLECTION']
-            for g in row['genre_list']:
-                g = g.strip()
-                if g and g != "nan":
-                    if g not in genre_gross:
-                        genre_gross[g] = []
-                    genre_gross[g].append(gross)
-        genre_avg = {k: np.mean(v) for k, v in genre_gross.items()}
-        genre_df = pd.DataFrame(list(genre_avg.items()), columns=['类型', '平均票房'])
-        fig_genre = px.bar(
-            genre_df,
-            x="类型",
-            y="平均票房",
-            title="各电影类型平均票房",
-            color_discrete_sequence=['#4169E1']
-        )
-        st.plotly_chart(fig_genre, use_container_width=True)
-
-        # 4. 导演Top10平均票房
-        st.subheader("4. 导演Top10平均票房：Jon Watts导演作品平均票房最高")
-        director_gross = df.groupby('DIRECTOR')['GROSS COLLECTION'].mean().sort_values(ascending=False).head(10).reset_index()
-        fig_dir = px.bar(
-            director_gross,
-            x="DIRECTOR",
-            y="GROSS COLLECTION",
-            title="Top10 导演平均票房",
-            labels={"DIRECTOR": "导演", "GROSS COLLECTION": "平均票房"},
-            color_discrete_sequence=['#2E8B57']
-        )
-        st.plotly_chart(fig_dir, use_container_width=True)
-
-        # 5. 电影时长 & 票房关系
-        st.subheader("5. 电影时长 与 票房收入关系：100–180 分钟为票房黄金区间")
-        runtime_gross_df = df[['runtime', 'GROSS COLLECTION']].dropna()
-        fig_runtime = px.scatter(
-            runtime_gross_df,
-            x="runtime",
-            y="GROSS COLLECTION",
-            title="电影时长 vs 票房",
-            labels={"runtime": "时长(分钟)", "GROSS COLLECTION": "票房收入"}
-        )
-        st.plotly_chart(fig_runtime, use_container_width=True)
-
-        # 6. MPAA分级数量分布
-        st.subheader("6. MPAA电影分级整体数量分布")
-        mpaa_count = df['certificate'].value_counts().dropna().reset_index()
-        mpaa_count.columns = ["分级", "数量"]
-        fig_mpaa_cnt = px.bar(
-            mpaa_count,
-            x="分级",
-            y="数量",
-            title="各分级影片数量分布"
-        )
-        st.plotly_chart(fig_mpaa_cnt, use_container_width=True)
-
-        # 7. MPAA分级 & 时长 箱线图
-        st.subheader("7. MPAA分级 与 电影时长分布：大部分影片时长集中在110–135分钟")
-        mpaa_runtime_df = df[['certificate', 'runtime']].dropna()
-        fig_box1 = px.box(
-            mpaa_runtime_df,
-            x="certificate",
-            y="runtime",
-            title="分级与电影时长分布",
-            labels={"certificate": "MPAA分级", "runtime": "时长(分钟)"}
-        )
-        st.plotly_chart(fig_box1, use_container_width=True)
-
-        # 8. MPAA分级 & 票房 箱线图
-        st.subheader("8. MPAA分级 与 电影票房收入分布：12A分级影片整体票房表现最优")
-        mpaa_gross_df = df[['certificate', 'GROSS COLLECTION']].dropna()
-        fig_box2 = px.box(
-            mpaa_gross_df,
-            x="certificate",
-            y="GROSS COLLECTION",
-            title="分级与票房收入分布",
-            labels={"certificate": "MPAA分级", "GROSS COLLECTION": "票房收入"}
-        )
-        st.plotly_chart(fig_box2, use_container_width=True)
-
-        st.info("💡 提示：所有图表数据均来自电影数据集，可根据需要拓展分析维度")
 
 # ===================== 程序入口 =====================
 if __name__ == "__main__":
