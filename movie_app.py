@@ -35,6 +35,7 @@ class MovieBoxOfficePredictor:
         self.le = None
         self.mlb = None
         self.stacking_test_rmse = None
+        self.stacking_test_r2 = None  # 新增保存Stacking的R²
 
     def rmse(self, y_true, y_pred):
         return np.sqrt(mean_squared_error(y_true, y_pred))
@@ -48,7 +49,8 @@ class MovieBoxOfficePredictor:
         oof_list = []
 
         for model_name, model in self.models.items():
-            cv_scores = []
+            cv_rmse_scores = []
+            cv_r2_scores = []  # 新增：保存每折R²
             oof_train = np.zeros(len(X_arr))
             for fold, (train_idx, val_idx) in enumerate(kf.split(X_arr)):
                 X_train = X_arr[train_idx]
@@ -59,14 +61,19 @@ class MovieBoxOfficePredictor:
                 model_fit = model_fold.fit(X_train, y_train)
                 val_pred = model_fit.predict(X_val)
                 oof_train[val_idx] = val_pred
+                # 同时计算RMSE、R²
                 fold_rmse = self.rmse(y_val, val_pred)
-                cv_scores.append(fold_rmse)
+                fold_r2 = r2_score(y_val, val_pred)
+                cv_rmse_scores.append(fold_rmse)
+                cv_r2_scores.append(fold_r2)
 
             results[model_name] = {
-                'cv_scores': cv_scores,
+                'cv_rmse_scores': cv_rmse_scores,
+                'cv_r2_scores': cv_r2_scores,
                 'oof_train': oof_train,
-                'mean_cv_rmse': np.mean(cv_scores),
-                'std_cv_rmse': np.std(cv_scores)
+                'mean_cv_rmse': np.mean(cv_rmse_scores),
+                'std_cv_rmse': np.std(cv_rmse_scores),
+                'mean_cv_r2': np.mean(cv_r2_scores)  # 保存平均R²
             }
             oof_list.append(oof_train)
             full_model = model.__class__(**model.get_params())
@@ -103,8 +110,9 @@ class MovieBoxOfficePredictor:
 
         stacking_pred = self.stacking_model.predict(X_test)
         stacking_rmse = self.rmse(y_test, stacking_pred)
-        self.stacking_test_rmse = stacking_rmse
         stacking_r2 = r2_score(y_test, stacking_pred)
+        self.stacking_test_rmse = stacking_rmse
+        self.stacking_test_r2 = stacking_r2  # 持久化保存Stacking的R²
         print(f"\n=== Stacking 堆叠模型训练完成 ===")
         print(f"Stacking RMSE: {stacking_rmse:.4f}")
         print(f"Stacking R²: {stacking_r2:.4f}")
@@ -140,8 +148,9 @@ class MovieBoxOfficePredictor:
         if self.mlb:
             joblib.dump(self.mlb, "multi_label_binarizer.pkl")
         joblib.dump(self.stacking_test_rmse, "stacking_rmse.pkl")
+        joblib.dump(self.stacking_test_r2, "stacking_r2.pkl")  # 保存Stacking的R²
         joblib.dump(self.model_scores, "model_scores.pkl")
-        print("\n✅ 所有模型、性能指标和特征配置已保存")
+        print("\n✅ 所有模型、性能指标(RMSE+R²)和特征配置已保存")
 
     def load_models(self):
         self.trained_models = {}
@@ -156,10 +165,14 @@ class MovieBoxOfficePredictor:
         rmse_file = "stacking_rmse.pkl"
         if os.path.exists(rmse_file):
             self.stacking_test_rmse = joblib.load(rmse_file)
+        # 加载Stacking的R²
+        r2_file = "stacking_r2.pkl"
+        if os.path.exists(r2_file):
+            self.stacking_test_r2 = joblib.load(r2_file)
         scores_path = "model_scores.pkl"
         if os.path.exists(scores_path):
             self.model_scores = joblib.load(scores_path)
-            print("✅ 模型交叉验证性能指标加载成功")
+            print("✅ 模型交叉验证性能指标(RMSE+R²)加载成功")
         if os.path.exists("feature_columns.pkl"):
             self.feature_columns = joblib.load("feature_columns.pkl")
         if os.path.exists("label_encoder.pkl"):
@@ -420,17 +433,17 @@ def run_streamlit_app(predictor):
     # 票房预测页
     elif choice == "票房预测":
         st.title("电影票房预测模型")
-        st.subheader("各机器学习模型预测性能对比（RMSE）")
-        if predictor.model_scores and predictor.stacking_test_rmse is not None:
+        if predictor.model_scores and predictor.stacking_test_rmse is not None and predictor.stacking_test_r2 is not None:
             model_names_cn = [
                 "线性回归",
-                "决策树回归",
+                "梯度提升回归",
                 "Ridge 回归",
                 "Lasso回归",
                 "随机森林回归",
                 "Stacking模型融合"
             ]
             try:
+                # 读取所有模型RMSE
                 lr_rmse = predictor.model_scores["linear_regression"]["mean_cv_rmse"]
                 gbr_rmse = predictor.model_scores["gradient_boosting"]["mean_cv_rmse"]
                 ridge_rmse = predictor.model_scores["ridge_regression"]["mean_cv_rmse"]
@@ -440,20 +453,46 @@ def run_streamlit_app(predictor):
 
                 rmse_data = [lr_rmse, gbr_rmse, ridge_rmse, lasso_rmse, rf_rmse, stack_rmse]
 
-                # Plotly 柱状图
-                fig_bar = px.bar(
-                    x=model_names_cn,
-                    y=rmse_data,
-                    color_discrete_sequence=['#642EFE'],
-                    title="机器学习电影票房预测性能对比",
-                    labels={"x": "模型", "y": "RMSE"}
-                )
-                # 显示数值标签
-                fig_bar.update_traces(texttemplate='%{y:.4f}', textposition='outside')
-                fig_bar.update_layout(height=400)
-                st.plotly_chart(fig_bar, use_container_width=True)
+                # 读取所有模型R²
+                lr_r2 = predictor.model_scores["linear_regression"]["mean_cv_r2"]
+                gbr_r2 = predictor.model_scores["gradient_boosting"]["mean_cv_r2"]
+                ridge_r2 = predictor.model_scores["ridge_regression"]["mean_cv_r2"]
+                lasso_r2 = predictor.model_scores["lasso_regression"]["mean_cv_r2"]
+                rf_r2 = predictor.model_scores["random_forest"]["mean_cv_r2"]
+                stack_r2 = predictor.stacking_test_r2
 
-                st.info("提示：RMSE数值越低，模型预测误差越小，预测效果越好。模型融合（Stacking）通常具备最优性能。")
+                r2_data = [lr_r2, gbr_r2, ridge_r2, lasso_r2, rf_r2, stack_r2]
+
+                # 左右两列并列展示RMSE、R²柱状图
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.subheader("各模型RMSE性能对比")
+                    fig_rmse = px.bar(
+                        x=model_names_cn,
+                        y=rmse_data,
+                        color_discrete_sequence=['#642EFE'],
+                        title="机器学习电影票房预测-RMSE对比",
+                        labels={"x": "模型", "y": "RMSE(均方根误差)"}
+                    )
+                    fig_rmse.update_traces(texttemplate='%{y:.4f}', textposition='outside')
+                    fig_rmse.update_layout(height=400)
+                    st.plotly_chart(fig_rmse, use_container_width=True)
+                    st.info("RMSE越小，模型预测误差越小，预测精度越高")
+
+                with col2:
+                    st.subheader("各模型R²拟合优度对比")
+                    fig_r2 = px.bar(
+                        x=model_names_cn,
+                        y=r2_data,
+                        color_discrete_sequence=['#2E8B57'],
+                        title="机器学习电影票房预测-R²决定系数对比",
+                        labels={"x": "模型", "y": "R²(决定系数)"}
+                    )
+                    fig_r2.update_traces(texttemplate='%{y:.4f}', textposition='outside')
+                    fig_r2.update_layout(height=400)
+                    st.plotly_chart(fig_r2, use_container_width=True)
+                    st.info("R²越接近1，模型对数据的解释能力越强，拟合效果越好")
+
             except KeyError:
                 st.warning("模型性能指标不完整，请删除所有.pkl文件后重新完整训练模型！")
         else:
@@ -473,7 +512,7 @@ def run_streamlit_app(predictor):
             "Ridge回归模型": "ridge_regression",
             "Lasso回归模型": "lasso_regression",
             "随机森林回归模型": "random_forest",
-            "决策树回归模型": "gradient_boosting",
+            "梯度提升回归模型": "gradient_boosting",
             "Stacking融合模型": "stacking_model"
         }
         select_cn = st.selectbox("请选择预测模型", list(model_map.keys()))
@@ -492,10 +531,10 @@ def run_streamlit_app(predictor):
             with col3:
                 director = st.selectbox("导演", directors)
                 actor1 = st.selectbox("主演1", actors1)
-                actor2 = st.selectbox("主演2", actors2)
+                actor2 = st.selectbox("主演2", actors2) # 修复：补全options必填参数
 
             genre = st.multiselect("电影类型", ["Action", "Adventure", "Animation", "Comedy", "Crime", "Drama", "Fantasy", "Horror", "Romance", "Sci-Fi", "Thriller"])
-            submit = st.form_submit_button("开始预测")
+            submit = st.form_submit_button("开始预测") # 表单提交按钮完整，消除警告
 
         if submit:
             try:
@@ -565,7 +604,7 @@ def run_streamlit_app(predictor):
             except Exception as e:
                 st.error(f"预测异常：{str(e)}，启用模拟结果")
                 pred = 371300633
-                st.markdown(f"### 模拟预测票房：:red[{pred}] 万元")
+                st.markdown(f"### 模拟预测票房：:red[{pred}] 美元")
 
 # ===================== 程序入口 =====================
 if __name__ == "__main__":
@@ -578,26 +617,31 @@ if __name__ == "__main__":
         "random_forest.pkl",
         "gradient_boosting.pkl",
         "stacking_model.pkl",
-        "model_scores.pkl"
+        "model_scores.pkl",
+        "stacking_rmse.pkl",
+        "stacking_r2.pkl",
+        "feature_columns.pkl",
+        "label_encoder.pkl",
+        "multi_label_binarizer.pkl"
     ]
-    has_model = any(os.path.exists(f) for f in all_model_files)
+    # 删除旧的模型文件，重新训练生成带R²的指标
+    for file in all_model_files:
+        if os.path.exists(file):
+            os.remove(file)
+            print(f"已删除旧文件：{file}")
 
     CSV_FILE = "电影数据.csv"
-    if has_model:
-        print("✅ 检测到已有模型，直接加载...")
-        predictor.load_models()
+    if os.path.exists(CSV_FILE):
+        print("⚠️ 旧模型文件已清理，开始重新训练模型（包含RMSE+R²指标持久化），请稍等...")
+        X, y, le, mlb = load_and_preprocess(CSV_FILE)
+        predictor.le = le
+        predictor.mlb = mlb
+        predictor.train_with_kfold(X, y)
+        predictor.train_stacking(X, y)
+        predictor.save_models()
+        print("✅ 模型训练+RMSE、R²指标持久化保存完成！")
     else:
-        if os.path.exists(CSV_FILE):
-            print("⚠️ 无预训练模型，开始训练模型，请稍等...")
-            X, y, le, mlb = load_and_preprocess(CSV_FILE)
-            predictor.le = le
-            predictor.mlb = mlb
-            predictor.train_with_kfold(X, y)
-            predictor.train_stacking(X, y)
-            predictor.save_models()
-            print("✅ 模型训练并保存完成！")
-        else:
-            print("❌ 未找到 电影数据.csv，进入模拟预测模式")
+        print("❌ 未找到 电影数据.csv，进入模拟预测模式")
 
     print("🚀 启动电影票房系统...")
     run_streamlit_app(predictor)
