@@ -17,6 +17,29 @@ import os
 import warnings
 warnings.filterwarnings("ignore")
 
+# -------------------------- 全局缓存工具（解决重复读取卡顿核心） --------------------------
+# 缓存原始CSV，全局仅读取1次，页面刷新/点击预测不再重复IO
+@st.cache_data
+def load_raw_csv(csv_path="电影数据.csv"):
+    df = pd.read_csv(csv_path)
+    df.columns = [c.strip() for c in df.columns]
+    return df
+
+# 缓存下拉框演员、导演列表，不用每次读取后去重排序
+@st.cache_data
+def get_select_options(df):
+    directors = sorted(df['DIRECTOR'].dropna().unique().tolist())
+    actors1 = sorted(df['ACTOR 1'].dropna().unique().tolist())
+    actors2 = sorted(df['ACTOR 2'].dropna().unique().tolist())
+    return directors, actors1, actors2
+
+# 缓存模型实例，全局只加载一次模型、编码器
+@st.cache_resource
+def get_predictor_instance():
+    pred = MovieBoxOfficePredictor()
+    pred.load_models()
+    return pred
+
 # ===================== 模型预测类 =====================
 class MovieBoxOfficePredictor:
     def __init__(self):
@@ -200,9 +223,7 @@ def extract_year(year_str):
     return int(res[0]) if res else np.nan
 
 def load_and_preprocess(csv_path):
-    df = pd.read_csv(csv_path)
-    df.columns = [c.strip() for c in df.columns]
-    
+    df = load_raw_csv(csv_path)
     df['GROSS COLLECTION'] = df['GROSS COLLECTION'].apply(parse_gross)
     df = df.dropna(subset=['GROSS COLLECTION']).reset_index(drop=True)
 
@@ -244,6 +265,8 @@ def load_and_preprocess(csv_path):
 
     X = pd.concat([X.drop('genre', axis=1), genre_df], axis=1)
     X = X.astype(float)
+    print(f"原始数据集总样本量：{len(df)}")
+    print(f"清洗后可用有效样本量：{X.shape[0]}")
     return X, y, le, mlb
 
 # ===================== Streamlit 网页应用 =====================
@@ -280,9 +303,8 @@ def run_streamlit_app(predictor):
         st.write("以下是电影数据的可视化分析图表，帮助你理解票房的影响因素")
         st.divider()
 
-        # ========== 新增：数据集预览 + 字段说明 ==========
-        df_raw = pd.read_csv("电影数据.csv")
-        df_raw.columns = [c.strip() for c in df_raw.columns]
+        # 复用缓存CSV，不再重复读取硬盘
+        df_raw = load_raw_csv()
 
         # 1. 数据集前10行展示
         st.subheader("一、原始数据集预览（前10行）")
@@ -499,13 +521,9 @@ def run_streamlit_app(predictor):
             st.warning("暂无训练完成的模型性能数据，请先运行模型训练流程生成模型文件！")
         st.divider()
 
-        # 预测表单
-        df = pd.read_csv("电影数据.csv")
-        df.columns = [c.strip() for c in df.columns]
-
-        directors = sorted(df['DIRECTOR'].dropna().unique().tolist())
-        actors1 = sorted(df['ACTOR 1'].dropna().unique().tolist())
-        actors2 = sorted(df['ACTOR 2'].dropna().unique().tolist())
+        # 缓存读取下拉选项，不用每次读取csv去重
+        df_raw = load_raw_csv()
+        directors, actors1, actors2 = get_select_options(df_raw)
 
         model_map = {
             "线性回归模型": "linear_regression",
@@ -537,79 +555,80 @@ def run_streamlit_app(predictor):
             submit = st.form_submit_button("开始预测") # 表单提交按钮完整，消除警告
 
         if submit:
-            try:
-                data = {
-                    "Year": [year],
-                    "runtime": [runtime],
-                    "certificate": [certificate],
-                    "RATING": [rating],
-                    "metascore": [metascore],
-                    "votes": [votes],
-                    "DIRECTOR": [director],
-                    "ACTOR 1": [actor1],
-                    "ACTOR 2": [actor2]
-                }
-                if not genre:
-                    genre = ["unknown"]
-                data["genre"] = [genre]
-                input_df = pd.DataFrame(data)
+            # 加载动画优化交互感知
+            with st.spinner("模型正在计算票房，请稍候..."):
+                try:
+                    data = {
+                        "Year": [year],
+                        "runtime": [runtime],
+                        "certificate": [certificate],
+                        "RATING": [rating],
+                        "metascore": [metascore],
+                        "votes": [votes],
+                        "DIRECTOR": [director],
+                        "ACTOR 1": [actor1],
+                        "ACTOR 2": [actor2]
+                    }
+                    if not genre:
+                        genre = ["unknown"]
+                    data["genre"] = [genre]
+                    input_df = pd.DataFrame(data)
 
-                if predictor.le:
-                    if certificate not in predictor.le.classes_:
-                        default_label = "unknown" if "unknown" in predictor.le.classes_ else predictor.le.classes_[0]
-                        input_df['certificate'] = predictor.le.transform([default_label])[0]
+                    if predictor.le:
+                        if certificate not in predictor.le.classes_:
+                            default_label = "unknown" if "unknown" in predictor.le.classes_ else predictor.le.classes_[0]
+                            input_df['certificate'] = predictor.le.transform([default_label])[0]
+                        else:
+                            input_df['certificate'] = predictor.le.transform(input_df['certificate'].astype(str))
+                        
+                        if director not in predictor.le.classes_:
+                            default_dir = "未知导演" if "未知导演" in predictor.le.classes_ else predictor.le.classes_[0]
+                            input_df['DIRECTOR'] = predictor.le.transform([default_dir])[0]
+                        else:
+                            input_df['DIRECTOR'] = predictor.le.transform(input_df['DIRECTOR'].astype(str))
+
+                        if actor1 not in predictor.le.classes_:
+                            default_act = "未知演员" if "未知演员" in predictor.le.classes_ else predictor.le.classes_[0]
+                            input_df['ACTOR 1'] = predictor.le.transform([default_act])[0]
+                        else:
+                            input_df['ACTOR 1'] = predictor.le.transform(input_df['ACTOR 1'].astype(str))
+
+                        if actor2 not in predictor.le.classes_:
+                            default_act2 = "未知演员" if "未知演员" in predictor.le.classes_ else predictor.le.classes_[0]
+                            input_df['ACTOR 2'] = predictor.le.transform([default_act2])[0]
+                        else:
+                            input_df['ACTOR 2'] = predictor.le.transform(input_df['ACTOR 2'].astype(str))
                     else:
-                        input_df['certificate'] = predictor.le.transform(input_df['certificate'].astype(str))
-                    
-                    if director not in predictor.le.classes_:
-                        default_dir = "未知导演" if "未知导演" in predictor.le.classes_ else predictor.le.classes_[0]
-                        input_df['DIRECTOR'] = predictor.le.transform([default_dir])[0]
+                        input_df['certificate'] = 0
+                        input_df['DIRECTOR'] = 0
+                        input_df['ACTOR 1'] = 0
+                        input_df['ACTOR 2'] = 0
+
+                    if predictor.mlb:
+                        genre_arr = predictor.mlb.transform(input_df['genre'])
+                        genre_df = pd.DataFrame(genre_arr, columns=predictor.mlb.classes_)
+                        input_df = pd.concat([input_df.drop('genre', axis=1), genre_df], axis=1)
                     else:
-                        input_df['DIRECTOR'] = predictor.le.transform(input_df['DIRECTOR'].astype(str))
+                        for col in predictor.feature_columns:
+                            if col not in input_df.columns:
+                                input_df[col] = 0
 
-                    if actor1 not in predictor.le.classes_:
-                        default_act = "未知演员" if "未知演员" in predictor.le.classes_ else predictor.le.classes_[0]
-                        input_df['ACTOR 1'] = predictor.le.transform([default_act])[0]
-                    else:
-                        input_df['ACTOR 1'] = predictor.le.transform(input_df['ACTOR 1'].astype(str))
+                    if predictor.feature_columns:
+                        input_df = input_df[predictor.feature_columns]
+                    input_df = input_df.astype(float)
 
-                    if actor2 not in predictor.le.classes_:
-                        default_act2 = "未知演员" if "未知演员" in predictor.le.classes_ else predictor.le.classes_[0]
-                        input_df['ACTOR 2'] = predictor.le.transform([default_act2])[0]
-                    else:
-                        input_df['ACTOR 2'] = predictor.le.transform(input_df['ACTOR 2'].astype(str))
-                else:
-                    input_df['certificate'] = 0
-                    input_df['DIRECTOR'] = 0
-                    input_df['ACTOR 1'] = 0
-                    input_df['ACTOR 2'] = 0
+                    pred_log = predictor.predict_by_model(input_df.values, select_model)
+                    pred_real = np.expm1(pred_log[0])
+                    st.success(f"当前使用模型：{select_cn}")
+                    st.markdown(f"### 预测票房：:red[{pred_real:.0f}] 美元")
+                except Exception as e:
+                    st.error(f"预测异常：{str(e)}，启用模拟结果")
+                    pred = 371300633
+                    st.markdown(f"### 模拟预测票房：:red[{pred}] 美元")
 
-                if predictor.mlb:
-                    genre_arr = predictor.mlb.transform(input_df['genre'])
-                    genre_df = pd.DataFrame(genre_arr, columns=predictor.mlb.classes_)
-                    input_df = pd.concat([input_df.drop('genre', axis=1), genre_df], axis=1)
-                else:
-                    for col in predictor.feature_columns:
-                        if col not in input_df.columns:
-                            input_df[col] = 0
-
-                if predictor.feature_columns:
-                    input_df = input_df[predictor.feature_columns]
-                input_df = input_df.astype(float)
-
-                pred_log = predictor.predict_by_model(input_df.values, select_model)
-                pred_real = np.expm1(pred_log[0])
-                st.success(f"当前使用模型：{select_cn}")
-                st.markdown(f"### 预测票房：:red[{pred_real:.0f}] 美元")
-            except Exception as e:
-                st.error(f"预测异常：{str(e)}，启用模拟结果")
-                pred = 371300633
-                st.markdown(f"### 模拟预测票房：:red[{pred}] 美元")
-
-# ===================== 程序入口 =====================
+# ===================== 程序入口（核心修改：不再强制删除模型文件） =====================
 if __name__ == "__main__":
-    predictor = MovieBoxOfficePredictor()
-
+    # 所有模型文件清单
     all_model_files = [
         "linear_regression.pkl",
         "ridge_regression.pkl",
@@ -624,24 +643,28 @@ if __name__ == "__main__":
         "label_encoder.pkl",
         "multi_label_binarizer.pkl"
     ]
-    # 删除旧的模型文件，重新训练生成带R²的指标
-    for file in all_model_files:
-        if os.path.exists(file):
-            os.remove(file)
-            print(f"已删除旧文件：{file}")
 
+    # 判断是否全部模型文件存在
+    all_model_exist = all([os.path.exists(f) for f in all_model_files])
     CSV_FILE = "电影数据.csv"
-    if os.path.exists(CSV_FILE):
-        print("⚠️ 旧模型文件已清理，开始重新训练模型（包含RMSE+R²指标持久化），请稍等...")
+
+    # 【关键修改】只有模型文件不全时，才重新训练；已有完整缓存模型直接跳过训练
+    if not all_model_exist and os.path.exists(CSV_FILE):
+        print("⚠️ 缺失模型缓存文件，开始训练模型（包含RMSE+R²指标持久化），请稍等...")
         X, y, le, mlb = load_and_preprocess(CSV_FILE)
-        predictor.le = le
-        predictor.mlb = mlb
-        predictor.train_with_kfold(X, y)
-        predictor.train_stacking(X, y)
-        predictor.save_models()
+        temp_predictor = MovieBoxOfficePredictor()
+        temp_predictor.le = le
+        temp_predictor.mlb = mlb
+        temp_predictor.train_with_kfold(X, y)
+        temp_predictor.train_stacking(X, y)
+        temp_predictor.save_models()
         print("✅ 模型训练+RMSE、R²指标持久化保存完成！")
+    elif all_model_exist:
+        print("✅ 检测到完整缓存模型文件，跳过训练，直接加载复用")
     else:
         print("❌ 未找到 电影数据.csv，进入模拟预测模式")
 
+    # 全局缓存模型实例，页面刷新、点击预测不会重复加载pkl
+    predictor = get_predictor_instance()
     print("🚀 启动电影票房系统...")
     run_streamlit_app(predictor)
