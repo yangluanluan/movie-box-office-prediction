@@ -387,7 +387,7 @@ def run_streamlit_app(predictor):
         )
         fig_corr.update_layout(width=800, height=600)
         st.plotly_chart(fig_corr, use_container_width=True)
-        st.caption("💡 相关系数绝对值越接近1，特征间线性相关性越强；可以看到votes（评价人数）与票房的正相关性最强，其次是RATING（大众评分）和metascore（专业影评分数）")
+        st.caption("💡 相关系数绝对值越接近1，特征间线性相关性越强；可以看到电影评价投票人数（votes）与大众评分（RATING）相关性最高，相关系数为 0.622，属于中等偏强正向相关，其次是评价投票人数（votes）与电影票房总收入（GROSS COLLECTION），相关系数 0.551")
         st.divider()
 
         # ===================== 原有图表（序号顺延） =====================
