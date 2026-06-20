@@ -330,7 +330,6 @@ def run_streamlit_app(predictor):
         field_df = pd.DataFrame(field_info)
         st.dataframe(field_df, use_container_width=True, hide_index=True)
         st.divider()
-        # ==============================================
 
         # 数据清洗与转换（用于图表分析）
         df = df_raw.copy()
@@ -340,8 +339,60 @@ def run_streamlit_app(predictor):
         df['runtime'] = df.astype(str)['runtime'].str.replace(' min', '').astype(float)
         df['votes'] = df.astype(str)['votes'].str.replace(',', '').astype(float)
 
-        # 1. 年份票房趋势 - 折线图
-        st.subheader("1. 电影票房随年份变化趋势：呈现出长期增长、阶段性波动、头部效应加剧的趋势")
+        # ===================== 新增：目标变量（票房）分布分析 =====================
+        st.subheader("三、目标变量（电影票房）分布分析")
+        # 原始票房分布直方图+箱线图
+        fig_gross_dist = px.histogram(
+            df,
+            x="GROSS COLLECTION",
+            title="原始电影票房整体分布（直方图 + 箱线图）",
+            labels={"GROSS COLLECTION": "票房收入", "count": "影片数量"},
+            color_discrete_sequence=['#4169E1'],
+            marginal="box"  # 附带箱线图，查看分位数和异常值
+        )
+        fig_gross_dist.update_layout(bargap=0.1)
+        st.plotly_chart(fig_gross_dist, use_container_width=True)
+
+        # 对数变换后的票房分布（解决右偏问题，适配回归模型）
+        df['log_gross'] = np.log1p(df['GROSS COLLECTION'])
+        fig_log_gross_dist = px.histogram(
+            df,
+            x="log_gross",
+            title="对数变换后电影票房分布（直方图 + 箱线图）",
+            labels={"log_gross": "对数变换后票房", "count": "影片数量"},
+            color_discrete_sequence=['#2E8B57'],
+            marginal="box"
+        )
+        fig_log_gross_dist.update_layout(bargap=0.1)
+        st.plotly_chart(fig_log_gross_dist, use_container_width=True)
+        st.caption("💡 电影票房数据呈明显右偏分布，大部分影片票房集中在低区间，少数头部影片票房极高；对数变换后分布更接近正态分布，更适合用于回归模型训练")
+        st.divider()
+
+        # ===================== 新增：数值特征相关性热图 =====================
+        st.subheader("四、数值特征相关性热图")
+        # 筛选数值型特征
+        numeric_cols = ['Year', 'runtime', 'RATING', 'metascore', 'votes', 'GROSS COLLECTION']
+        numeric_df = df[numeric_cols].dropna()
+        # 计算皮尔逊相关系数矩阵
+        corr_matrix = numeric_df.corr()
+        # 绘制交互式相关性热图
+        fig_corr = px.imshow(
+            corr_matrix,
+            text_auto=True,
+            color_continuous_scale='RdBu_r',
+            zmin=-1,
+            zmax=1,
+            title="数值特征相关性矩阵热图",
+            labels=dict(x="特征", y="特征", color="相关系数")
+        )
+        fig_corr.update_layout(width=800, height=600)
+        st.plotly_chart(fig_corr, use_container_width=True)
+        st.caption("💡 相关系数绝对值越接近1，特征间线性相关性越强；可以看到votes（评价人数）与票房的正相关性最强，其次是RATING（大众评分）和metascore（专业影评分数）")
+        st.divider()
+
+        # ===================== 原有图表（序号顺延） =====================
+        # 5. 年份票房趋势 - 折线图
+        st.subheader("5. 电影票房随年份变化趋势：呈现出长期增长、阶段性波动、头部效应加剧的趋势")
         year_gross = df.groupby('Year')['GROSS COLLECTION'].mean().dropna().reset_index()
         fig_line = px.line(
             year_gross,
@@ -352,8 +403,8 @@ def run_streamlit_app(predictor):
         )
         st.plotly_chart(fig_line, use_container_width=True)
 
-        # 2. 评分与票房 - 散点图
-        st.subheader("2. 电影评分与票房关系：评分与票房之间存在弱正相关关系，票房较高的电影普遍集中在 7.5-8.5 分区间")
+        # 6. 评分与票房 - 散点图
+        st.subheader("6. 电影评分与票房关系：评分与票房之间存在弱正相关关系，票房较高的电影普遍集中在 7.5-8.5 分区间")
         scatter_df = df[['RATING', 'GROSS COLLECTION']].dropna()
         fig_scatter = px.scatter(
             scatter_df,
@@ -364,8 +415,8 @@ def run_streamlit_app(predictor):
         )
         st.plotly_chart(fig_scatter, use_container_width=True)
 
-        # 3. 不同类型电影平均票房
-        st.subheader("3. 不同类型电影的平均票房：冒险类影片平均票房最高")
+        # 7. 不同类型电影平均票房
+        st.subheader("7. 不同类型电影的平均票房：冒险类影片平均票房最高")
         def split_genre(x):
             return str(x).split(',')
         df['genre_list'] = df['genre'].apply(split_genre)
@@ -389,8 +440,8 @@ def run_streamlit_app(predictor):
         )
         st.plotly_chart(fig_genre, use_container_width=True)
 
-        # 4. 导演Top10平均票房
-        st.subheader("4. 导演Top10平均票房：Jon Watts导演作品平均票房最高")
+        # 8. 导演Top10平均票房
+        st.subheader("8. 导演Top10平均票房：Jon Watts导演作品平均票房最高")
         director_gross = df.groupby('DIRECTOR')['GROSS COLLECTION'].mean().sort_values(ascending=False).head(10).reset_index()
         fig_dir = px.bar(
             director_gross,
@@ -402,8 +453,8 @@ def run_streamlit_app(predictor):
         )
         st.plotly_chart(fig_dir, use_container_width=True)
 
-        # 5. 电影时长 & 票房关系
-        st.subheader("5. 电影时长 与 票房收入关系：100–180 分钟为票房黄金区间")
+        # 9. 电影时长 & 票房关系
+        st.subheader("9. 电影时长 与 票房收入关系：100–180 分钟为票房黄金区间")
         runtime_gross_df = df[['runtime', 'GROSS COLLECTION']].dropna()
         fig_runtime = px.scatter(
             runtime_gross_df,
@@ -414,8 +465,8 @@ def run_streamlit_app(predictor):
         )
         st.plotly_chart(fig_runtime, use_container_width=True)
 
-        # 6. MPAA分级数量分布
-        st.subheader("6. MPAA电影分级整体数量分布")
+        # 10. MPAA分级数量分布
+        st.subheader("10. MPAA电影分级整体数量分布")
         mpaa_count = df['certificate'].value_counts().dropna().reset_index()
         mpaa_count.columns = ["分级", "数量"]
         fig_mpaa_cnt = px.bar(
@@ -426,8 +477,8 @@ def run_streamlit_app(predictor):
         )
         st.plotly_chart(fig_mpaa_cnt, use_container_width=True)
 
-        # 7. MPAA分级 & 时长 箱线图
-        st.subheader("7. MPAA分级 与 电影时长分布：大部分影片时长集中在110–135分钟")
+        # 11. MPAA分级 & 时长 箱线图
+        st.subheader("11. MPAA分级 与 电影时长分布：大部分影片时长集中在110–135分钟")
         mpaa_runtime_df = df[['certificate', 'runtime']].dropna()
         fig_box1 = px.box(
             mpaa_runtime_df,
@@ -438,8 +489,8 @@ def run_streamlit_app(predictor):
         )
         st.plotly_chart(fig_box1, use_container_width=True)
 
-        # 8. MPAA分级 & 票房 箱线图
-        st.subheader("8. MPAA分级 与 电影票房收入分布：12A分级影片整体票房表现最优")
+        # 12. MPAA分级 & 票房 箱线图
+        st.subheader("12. MPAA分级 与 电影票房收入分布：12A分级影片整体票房表现最优")
         mpaa_gross_df = df[['certificate', 'GROSS COLLECTION']].dropna()
         fig_box2 = px.box(
             mpaa_gross_df,
