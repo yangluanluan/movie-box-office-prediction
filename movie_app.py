@@ -204,7 +204,7 @@ class MovieBoxOfficePredictor:
             self.mlb = joblib.load("multi_label_binarizer.pkl")
         print("✅ 所有基模型和特征配置加载完成")
 
-# ===================== 数据预处理函数 =====================
+# ===================== 数据预处理函数（已修复：每个分类特征独立编码器，避免覆盖分级类别） =====================
 def parse_gross(gross_str):
     if pd.isna(gross_str) or str(gross_str).strip() == "":
         return np.nan
@@ -250,11 +250,19 @@ def load_and_preprocess(csv_path):
     y = combined['GROSS COLLECTION']
 
     X['certificate'] = X['certificate'].fillna("unknown")
-    le = LabelEncoder()
-    X['certificate'] = le.fit_transform(X['certificate'].astype(str))
-    X['DIRECTOR'] = le.fit_transform(X['DIRECTOR'].astype(str))
-    X['ACTOR 1'] = le.fit_transform(X['ACTOR 1'].astype(str))
-    X['ACTOR 2'] = le.fit_transform(X['ACTOR 2'].astype(str))
+
+    # 每个分类特征单独创建LabelEncoder，互不覆盖
+    le_certificate = LabelEncoder()
+    X['certificate'] = le_certificate.fit_transform(X['certificate'].astype(str))
+
+    le_director = LabelEncoder()
+    X['DIRECTOR'] = le_director.fit_transform(X['DIRECTOR'].astype(str))
+
+    le_actor1 = LabelEncoder()
+    X['ACTOR 1'] = le_actor1.fit_transform(X['ACTOR 1'].astype(str))
+
+    le_actor2 = LabelEncoder()
+    X['ACTOR 2'] = le_actor2.fit_transform(X['ACTOR 2'].astype(str))
 
     def split_genre(x):
         return str(x).split(',')
@@ -267,7 +275,9 @@ def load_and_preprocess(csv_path):
     X = X.astype(float)
     print(f"原始数据集总样本量：{len(df)}")
     print(f"清洗后可用有效样本量：{X.shape[0]}")
-    return X, y, le, mlb
+
+    # 只返回分级的编码器，用于前端下拉框展示所有BBFC分级
+    return X, y, le_certificate, mlb
 
 # ===================== Streamlit 网页应用 =====================
 def run_streamlit_app(predictor):
@@ -293,7 +303,7 @@ def run_streamlit_app(predictor):
             票房作为衡量电影能否盈利的重要指标，受诸多因素共同作用影响，
             且其影响机制较为复杂，票房的准确预测难度较大。本项目首先将影响电影类型、上映档期、导演、演员等因素量化处理并进行可视化分析。再利用多种回归模型与Stacking融合模型实现电影票房预测。
             """)
-    
+
         with col2:
             st.info("本系统已取消登录验证，可直接前往【票房预测】或【票房分析】使用功能")
 
@@ -315,17 +325,17 @@ def run_streamlit_app(predictor):
         # 2. 字段含义解释表格
         st.subheader("二、数据字段详细说明")
         field_info = [
-            {"字段名":"Year","中文名称":"上映年份","字段含义":"电影正式上映的年份"},
-            {"字段名":"runtime","中文名称":"影片时长","字段含义":"电影正片时长，单位：分钟"},
-            {"字段名":"certificate","中文名称":"影片分级","字段含义":"欧美MPAA电影分级（G/PG/PG-13/R等），用于划分观影人群"},
-            {"字段名":"genre","中文名称":"电影类型","字段含义":"影片题材类型，支持多类型组合，如动作、喜剧、科幻等"},
-            {"字段名":"RATING","中文名称":"大众评分","字段含义":"普通观众给出的综合评分，满分10分"},
-            {"字段名":"metascore","中文名称":"专业影评分数","字段含义":"专业影评人综合打分，满分100分"},
-            {"字段名":"votes","中文名称":"评价人数","字段含义":"参与评分、投票的用户总数量"},
-            {"字段名":"DIRECTOR","中文名称":"导演","字段含义":"电影主创导演姓名"},
-            {"字段名":"ACTOR 1","中文名称":"主演1","字段含义":"第一主演/主要演员"},
-            {"字段名":"ACTOR 2","中文名称":"主演2","字段含义":"第二主演/联合主演"},
-            {"字段名":"GROSS COLLECTION","中文名称":"总票房","字段含义":"电影全球总票房，原始单位为美元，含M（百万）、K（千）单位标识"}
+            {"字段名": "Year", "中文名称": "上映年份", "字段含义": "电影正式上映的年份"},
+            {"字段名": "runtime", "中文名称": "影片时长", "字段含义": "电影正片时长，单位：分钟"},
+            {"字段名": "certificate", "中文名称": "影片分级", "字段含义": "英国BBFC电影分级，用于划分观影人群"},
+            {"字段名": "genre", "中文名称": "电影类型", "字段含义": "影片题材类型，支持多类型组合，如动作、喜剧、科幻等"},
+            {"字段名": "RATING", "中文名称": "大众评分", "字段含义": "普通观众给出的综合评分，满分10分"},
+            {"字段名": "metascore", "中文名称": "专业影评分数", "字段含义": "专业影评人综合打分，满分100分"},
+            {"字段名": "votes", "中文名称": "评价人数", "字段含义": "参与评分、投票的用户总数量"},
+            {"字段名": "DIRECTOR", "中文名称": "导演", "字段含义": "电影主创导演姓名"},
+            {"字段名": "ACTOR 1", "中文名称": "主演1", "字段含义": "第一主演/主要演员"},
+            {"字段名": "ACTOR 2", "中文名称": "主演2", "字段含义": "第二主演/联合主演"},
+            {"字段名": "GROSS COLLECTION", "中文名称": "总票房", "字段含义": "电影全球总票房，原始单位为美元，含M（百万）、K（千）单位标识"}
         ]
         field_df = pd.DataFrame(field_info)
         st.dataframe(field_df, use_container_width=True, hide_index=True)
@@ -465,8 +475,8 @@ def run_streamlit_app(predictor):
         )
         st.plotly_chart(fig_runtime, use_container_width=True)
 
-        # 10. MPAA分级数量分布
-        st.subheader("10. MPAA电影分级整体数量分布")
+        # 10. BBFC分级数量分布
+        st.subheader("10. BBFC电影分级整体数量分布")
         mpaa_count = df['certificate'].value_counts().dropna().reset_index()
         mpaa_count.columns = ["分级", "数量"]
         fig_mpaa_cnt = px.bar(
@@ -477,27 +487,27 @@ def run_streamlit_app(predictor):
         )
         st.plotly_chart(fig_mpaa_cnt, use_container_width=True)
 
-        # 11. MPAA分级 & 时长 箱线图
-        st.subheader("11. MPAA分级 与 电影时长分布：大部分影片时长集中在110–135分钟")
+        # 11. BBFC分级 & 时长 箱线图
+        st.subheader("11. BBFC分级 与 电影时长分布：大部分影片时长集中在110–135分钟")
         mpaa_runtime_df = df[['certificate', 'runtime']].dropna()
         fig_box1 = px.box(
             mpaa_runtime_df,
             x="certificate",
             y="runtime",
             title="分级与电影时长分布",
-            labels={"certificate": "MPAA分级", "runtime": "时长(分钟)"}
+            labels={"certificate": "BBFC分级", "runtime": "时长(分钟)"}
         )
         st.plotly_chart(fig_box1, use_container_width=True)
 
-        # 12. MPAA分级 & 票房 箱线图
-        st.subheader("12. MPAA分级 与 电影票房收入分布：12A分级影片整体票房表现最优")
+        # 12. BBFC分级 & 票房 箱线图
+        st.subheader("12. BBFC分级 与 电影票房收入分布：12A分级影片整体票房表现最优")
         mpaa_gross_df = df[['certificate', 'GROSS COLLECTION']].dropna()
         fig_box2 = px.box(
             mpaa_gross_df,
             x="certificate",
             y="GROSS COLLECTION",
             title="分级与票房收入分布",
-            labels={"certificate": "MPAA分级", "GROSS COLLECTION": "票房收入"}
+            labels={"certificate": "BBFC分级", "GROSS COLLECTION": "票房收入"}
         )
         st.plotly_chart(fig_box2, use_container_width=True)
 
@@ -590,20 +600,43 @@ def run_streamlit_app(predictor):
         with st.form("prediction_form"):
             col1, col2, col3 = st.columns(3)
             with col1:
-                year = st.number_input("上映年份", min_value=1900, max_value=2100, value=2015)
-                runtime = st.number_input("电影时长(分钟)", value=120)
-                rating = st.number_input("电影评分", min_value=0.0, max_value=10.0, value=7.5, step=0.1)
+                # 预设肖申克的救赎：1994年
+                year = st.number_input("上映年份", min_value=1900, max_value=2100, value=1994)
+                # 预设时长142分钟
+                runtime = st.number_input("电影时长(分钟)", value=142)
+                # 预设评分9.3
+                rating = st.number_input("电影评分", min_value=0.0, max_value=10.0, value=9.3, step=0.1)
             with col2:
-                metascore = st.number_input("影评分数", min_value=0, max_value=100, value=70)
-                votes = st.number_input("投票数", value=100000)
-                certificate = st.selectbox("分级", ["G", "PG", "PG-13", "R", "unknown"])
+                # 预设影评分数81
+                metascore = st.number_input("影评分数", min_value=0, max_value=100, value=81)
+                # 预设投票数2603814
+                votes = st.number_input("投票数", value=2603814)
+                # 从分级专属编码器读取所有BBFC分级
+                if predictor.le is not None:
+                    cert_options = sorted(predictor.le.classes_.tolist())
+                else:
+                    cert_options = ["unknown"]
+                # 默认选中分级15
+                cert_index = cert_options.index("15") if "15" in cert_options else 0
+                certificate = st.selectbox("BBFC电影分级", cert_options, index=cert_index)
             with col3:
-                director = st.selectbox("导演", directors)
-                actor1 = st.selectbox("主演1", actors1)
-                actor2 = st.selectbox("主演2", actors2) # 修复：补全options必填参数
+                # 默认导演 Frank Darabont
+                dir_index = directors.index("Frank Darabont") if "Frank Darabont" in directors else 0
+                director = st.selectbox("导演", directors, index=dir_index)
+                # 默认主演1 Tim Robbins
+                act1_index = actors1.index("Tim Robbins") if "Tim Robbins" in actors1 else 0
+                actor1 = st.selectbox("主演1", actors1, index=act1_index)
+                # 默认主演2 Morgan Freeman
+                act2_index = actors2.index("Morgan Freeman") if "Morgan Freeman" in actors2 else 0
+                actor2 = st.selectbox("主演2", actors2, index=act2_index)
 
-            genre = st.multiselect("电影类型", ["Action", "Adventure", "Animation", "Comedy", "Crime", "Drama", "Fantasy", "Horror", "Romance", "Sci-Fi", "Thriller"])
-            submit = st.form_submit_button("开始预测") # 表单提交按钮完整，消除警告
+            # 默认选中剧情类Drama
+            genre = st.multiselect(
+                "电影类型",
+                ["Action", "Adventure", "Animation", "Comedy", "Crime", "Drama", "Fantasy", "Horror", "Romance", "Sci-Fi", "Thriller"],
+                default=["Drama"]
+            )
+            submit = st.form_submit_button("开始预测")
 
         if submit:
             # 加载动画优化交互感知
@@ -631,7 +664,7 @@ def run_streamlit_app(predictor):
                             input_df['certificate'] = predictor.le.transform([default_label])[0]
                         else:
                             input_df['certificate'] = predictor.le.transform(input_df['certificate'].astype(str))
-                        
+
                         if director not in predictor.le.classes_:
                             default_dir = "未知导演" if "未知导演" in predictor.le.classes_ else predictor.le.classes_[0]
                             input_df['DIRECTOR'] = predictor.le.transform([default_dir])[0]
@@ -670,14 +703,17 @@ def run_streamlit_app(predictor):
 
                     pred_log = predictor.predict_by_model(input_df.values, select_model)
                     pred_real = np.expm1(pred_log[0])
+                    # 转换为百万美元，保留两位小数展示
+                    pred_million = pred_real / 1_000_000
                     st.success(f"当前使用模型：{select_cn}")
-                    st.markdown(f"### 预测票房：:red[{pred_real:.0f}] 美元")
+                    st.markdown(f"### 预测票房：:red[${pred_million:.2f}M]（折合 {pred_real:,.0f} 美元）")
                 except Exception as e:
                     st.error(f"预测异常：{str(e)}，启用模拟结果")
                     pred = 371300633
-                    st.markdown(f"### 模拟预测票房：:red[{pred}] 美元")
+                    pred_million = pred / 1_000_000
+                    st.markdown(f"### 模拟预测票房：:red[${pred_million:.2f}M]（折合 {pred:,.0f} 美元）")
 
-# ===================== 程序入口（核心修改：不再强制删除模型文件） =====================
+# ===================== 程序入口 =====================
 if __name__ == "__main__":
     # 所有模型文件清单
     all_model_files = [
@@ -699,23 +735,23 @@ if __name__ == "__main__":
     all_model_exist = all([os.path.exists(f) for f in all_model_files])
     CSV_FILE = "电影数据.csv"
 
-    # 【关键修改】只有模型文件不全时，才重新训练；已有完整缓存模型直接跳过训练
+    # 缺失模型文件则重新训练
     if not all_model_exist and os.path.exists(CSV_FILE):
-        print("⚠️ 缺失模型缓存文件，开始训练模型（包含RMSE+R²指标持久化），请稍等...")
-        X, y, le, mlb = load_and_preprocess(CSV_FILE)
+        print("⚠️ 缺失模型缓存文件，开始训练模型，请稍等...")
+        X, y, le_cert, mlb = load_and_preprocess(CSV_FILE)
         temp_predictor = MovieBoxOfficePredictor()
-        temp_predictor.le = le
+        temp_predictor.le = le_cert
         temp_predictor.mlb = mlb
         temp_predictor.train_with_kfold(X, y)
         temp_predictor.train_stacking(X, y)
         temp_predictor.save_models()
-        print("✅ 模型训练+RMSE、R²指标持久化保存完成！")
+        print("✅ 模型训练、编码器保存完成！")
     elif all_model_exist:
         print("✅ 检测到完整缓存模型文件，跳过训练，直接加载复用")
     else:
         print("❌ 未找到 电影数据.csv，进入模拟预测模式")
 
-    # 全局缓存模型实例，页面刷新、点击预测不会重复加载pkl
+    # 全局加载模型
     predictor = get_predictor_instance()
     print("🚀 启动电影票房系统...")
     run_streamlit_app(predictor)
