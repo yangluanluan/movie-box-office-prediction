@@ -37,7 +37,7 @@ def get_predictor_instance():
     pred.load_models()
     return pred
 
-# ===================== 模型预测类（修复：原始票房尺度计算评估指标） =====================
+# ===================== 模型预测类（修复维度不匹配BUG） =====================
 class MovieBoxOfficePredictor:
     def __init__(self):
         self.models = {
@@ -53,6 +53,9 @@ class MovieBoxOfficePredictor:
         self.full_oof = None
         self.feature_columns = None
         self.le_certificate = None
+        self.le_director = None
+        self.le_actor1 = None
+        self.le_actor2 = None
         self.mlb = None
         self.stacking_test_rmse = None
         self.stacking_test_r2 = None
@@ -84,10 +87,11 @@ class MovieBoxOfficePredictor:
                 model_fold = model.__class__(**model.get_params())
                 model_fit = model_fold.fit(X_train, y_train_log)
                 val_pred_log = model_fit.predict(X_val)
+                # 修复1：压缩为一维数组，解决维度不匹配赋值报错
+                val_pred_log = val_pred_log.ravel()
                 val_pred_real = np.expm1(val_pred_log)
                 oof_train[val_idx] = val_pred_log
 
-                # 核心修复：基于原始真实票房计算误差指标
                 fold_rmse = self.rmse(y_val_real, val_pred_real)
                 fold_r2 = r2_score(y_val_real, val_pred_real)
                 cv_rmse_scores.append(fold_rmse)
@@ -163,12 +167,18 @@ class MovieBoxOfficePredictor:
             joblib.dump(self.feature_columns, "feature_columns.pkl")
         if self.le_certificate:
             joblib.dump(self.le_certificate, "le_certificate.pkl")
+        if self.le_director:
+            joblib.dump(self.le_director, "le_director.pkl")
+        if self.le_actor1:
+            joblib.dump(self.le_actor1, "le_actor1.pkl")
+        if self.le_actor2:
+            joblib.dump(self.le_actor2, "le_actor2.pkl")
         if self.mlb:
             joblib.dump(self.mlb, "multi_label_binarizer.pkl")
         joblib.dump(self.stacking_test_rmse, "stacking_rmse.pkl")
         joblib.dump(self.stacking_test_r2, "stacking_r2.pkl")
         joblib.dump(self.model_scores, "model_scores.pkl")
-        print("\n✅ 模型、原始尺度评估指标、编码器已保存")
+        print("\n✅ 模型、原始尺度评估指标、所有分类编码器已保存")
 
     def load_models(self):
         self.trained_models = {}
@@ -188,9 +198,15 @@ class MovieBoxOfficePredictor:
             self.feature_columns = joblib.load("feature_columns.pkl")
         if os.path.exists("le_certificate.pkl"):
             self.le_certificate = joblib.load("le_certificate.pkl")
+        if os.path.exists("le_director.pkl"):
+            self.le_director = joblib.load("le_director.pkl")
+        if os.path.exists("le_actor1.pkl"):
+            self.le_actor1 = joblib.load("le_actor1.pkl")
+        if os.path.exists("le_actor2.pkl"):
+            self.le_actor2 = joblib.load("le_actor2.pkl")
         if os.path.exists("multi_label_binarizer.pkl"):
             self.mlb = joblib.load("multi_label_binarizer.pkl")
-        print("✅ 模型与编码器加载完成")
+        print("✅ 模型与所有分类编码器加载完成")
 
 # ===================== 工具函数 =====================
 def parse_gross(gross_str):
@@ -222,7 +238,7 @@ def load_and_preprocess(csv_path):
     df['GROSS COLLECTION'] = df['GROSS COLLECTION'].apply(parse_gross)
     df = df.dropna(subset=['GROSS COLLECTION']).reset_index(drop=True)
 
-    # 修复1：票房上下1% Winsor缩尾，剔除极端爆款异常值
+    # 票房上下1% Winsor缩尾，剔除极端爆款异常值
     df['GROSS_WINSOR'] = winsorize(df['GROSS COLLECTION'], limits=[0.01, 0.01])
     y_raw = df['GROSS_WINSOR'].copy()
     y_log = np.log1p(y_raw)
@@ -250,12 +266,12 @@ def load_and_preprocess(csv_path):
 
     X['certificate'] = X['certificate'].fillna("unknown")
 
-    # 修复2：稀有导演、演员合并降噪，抑制爆款特征权重过高
+    # 稀有导演、演员合并降噪
     X['DIRECTOR'] = freq_encode_rare_cat(X['DIRECTOR'], min_count=3)
     X['ACTOR 1'] = freq_encode_rare_cat(X['ACTOR 1'], min_count=3)
     X['ACTOR 2'] = freq_encode_rare_cat(X['ACTOR 2'], min_count=3)
 
-    # 每个分类独立编码器，互不覆盖
+    # 独立编码器
     le_certificate = LabelEncoder()
     X['certificate'] = le_certificate.fit_transform(X['certificate'].astype(str))
 
@@ -279,7 +295,7 @@ def load_and_preprocess(csv_path):
     X = X.astype(float)
     print(f"原始数据集总样本量：{len(df)}")
     print(f"缩尾清洗后有效样本量：{X.shape[0]}")
-    return X, y_log, y_raw, le_certificate, mlb
+    return X, y_log, y_raw, le_certificate, le_director, le_actor1, le_actor2, mlb
 
 # ===================== Streamlit 网页应用 =====================
 def run_streamlit_app(predictor):
@@ -328,7 +344,7 @@ def run_streamlit_app(predictor):
             {"字段名": "metascore", "中文名称": "影评分数", "字段含义": "专业影评人打分，满分100分"},
             {"字段名": "votes", "中文名称": "评价人数", "字段含义": "参与评分用户总数"},
             {"字段名": "DIRECTOR", "中文名称": "导演", "字段含义": "电影主创导演"},
-            {"字段名": "ACTOR 1", "中文名称": "主演1", "字段含义": "第一主演"},
+            {"字段name": "ACTOR 1", "中文名称": "主演1", "字段含义": "第一主演"},
             {"字段名": "ACTOR 2", "中文名称": "主演2", "字段含义": "第二主演"},
             {"字段名": "GROSS COLLECTION", "中文名称": "总票房", "字段含义": "全球总票房（美元）"}
         ]
@@ -490,14 +506,15 @@ def run_streamlit_app(predictor):
                     input_df['certificate'] = predictor.le_certificate.transform([certificate])[0]
                     rare_label = "其他_稀有类别"
 
+                    # 修复2：传入正确的标签编码器，不再传入模型特征权重
                     def safe_encode(col_val, encoder):
                         if col_val not in encoder.classes_:
                             return encoder.transform([rare_label if rare_label in encoder.classes_ else encoder.classes_[0]])[0]
                         return encoder.transform([col_val])[0]
 
-                    input_df['DIRECTOR'] = safe_encode(director, predictor.trained_models['linear_regression'].feature_importances_)
-                    input_df['ACTOR 1'] = safe_encode(actor1, predictor.trained_models['linear_regression'].feature_importances_)
-                    input_df['ACTOR 2'] = safe_encode(actor2, predictor.trained_models['linear_regression'].feature_importances_)
+                    input_df['DIRECTOR'] = safe_encode(director, predictor.le_director)
+                    input_df['ACTOR 1'] = safe_encode(actor1, predictor.le_actor1)
+                    input_df['ACTOR 2'] = safe_encode(actor2, predictor.le_actor2)
 
                     genre_arr = predictor.mlb.transform(input_df['genre'])
                     genre_df = pd.DataFrame(genre_arr, columns=predictor.mlb.classes_)
@@ -517,30 +534,31 @@ def run_streamlit_app(predictor):
                     pred = 371300633
                     st.markdown(f"### 模拟预测票房：${pred/1_000_000:.2f}M")
 
-# ===================== 程序入口（云服务器部署适配） =====================
+# ===================== 程序入口 =====================
 if __name__ == "__main__":
-    # 清理旧版不兼容模型文件
+    # 清理所有旧缓存文件
     all_model_files = [
         "linear_regression.pkl", "ridge_regression.pkl", "lasso_regression.pkl",
         "random_forest.pkl", "gradient_boosting.pkl", "stacking_model.pkl",
         "model_scores.pkl", "stacking_rmse.pkl", "stacking_r2.pkl",
-        "feature_columns.pkl", "le_certificate.pkl", "multi_label_binarizer.pkl",
+        "feature_columns.pkl", "le_certificate.pkl", "le_director.pkl",
+        "le_actor1.pkl", "le_actor2.pkl", "multi_label_binarizer.pkl",
         "label_encoder.pkl"
     ]
-    all_exist = all(os.path.exists(f) for f in all_model_files)
-    csv_file = "电影数据.csv"
-
-    # 旧模型全部删除，重新训练
     for file in all_model_files:
         if os.path.exists(file):
             os.remove(file)
-    print("✅ 已清理所有旧版模型缓存文件，避免EOF文件损坏报错")
+    print("✅ 已清理所有旧版模型缓存文件")
 
+    csv_file = "电影数据.csv"
     if os.path.exists(csv_file):
         print("开始执行数据清洗+模型训练...")
-        X, y_log, y_raw, le_cert, mlb = load_and_preprocess(csv_file)
+        X, y_log, y_raw, le_cert, le_dir, le_act1, le_act2, mlb = load_and_preprocess(csv_file)
         pred = MovieBoxOfficePredictor()
         pred.le_certificate = le_cert
+        pred.le_director = le_dir
+        pred.le_actor1 = le_act1
+        pred.le_actor2 = le_act2
         pred.mlb = mlb
         pred.train_with_kfold(X, y_log, y_raw)
         pred.train_stacking(X, y_log, y_raw)
@@ -548,9 +566,4 @@ if __name__ == "__main__":
         print("✅ 模型训练保存完成")
 
     predictor = get_predictor_instance()
-    # 云服务器外网访问配置
-    import sys
-    if len(sys.argv) > 1 and sys.argv[1] == "server":
-        run_streamlit_app(predictor)
-    else:
-        run_streamlit_app(predictor)
+    run_streamlit_app(predictor)
