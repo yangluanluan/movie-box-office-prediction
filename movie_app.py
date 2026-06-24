@@ -1,6 +1,5 @@
 # 依赖安装（首次运行执行）
-# pip install streamlit pandas numpy scikit-learn joblib plotly
-
+# pip install streamlit pandas numpy scikit-learn joblib plotly scipy
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -12,20 +11,19 @@ from sklearn.linear_model import LinearRegression, Ridge, Lasso
 from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
 from sklearn.metrics import mean_squared_error, r2_score
 from sklearn.preprocessing import LabelEncoder, MultiLabelBinarizer
+from scipy.stats.mstats import winsorize
 import joblib
 import os
 import warnings
 warnings.filterwarnings("ignore")
 
-# -------------------------- 全局缓存工具（解决重复读取卡顿核心） --------------------------
-# 缓存原始CSV，全局仅读取1次，页面刷新/点击预测不再重复IO
+# -------------------------- 全局缓存工具 --------------------------
 @st.cache_data
 def load_raw_csv(csv_path="电影数据.csv"):
     df = pd.read_csv(csv_path)
     df.columns = [c.strip() for c in df.columns]
     return df
 
-# 缓存下拉框演员、导演列表，不用每次读取后去重排序
 @st.cache_data
 def get_select_options(df):
     directors = sorted(df['DIRECTOR'].dropna().unique().tolist())
@@ -33,14 +31,13 @@ def get_select_options(df):
     actors2 = sorted(df['ACTOR 2'].dropna().unique().tolist())
     return directors, actors1, actors2
 
-# 缓存模型实例，全局只加载一次模型、编码器
 @st.cache_resource
 def get_predictor_instance():
     pred = MovieBoxOfficePredictor()
     pred.load_models()
     return pred
 
-# ===================== 模型预测类 =====================
+# ===================== 模型预测类（修复：原始票房尺度计算评估指标） =====================
 class MovieBoxOfficePredictor:
     def __init__(self):
         self.models = {
@@ -55,38 +52,44 @@ class MovieBoxOfficePredictor:
         self.stacking_model = None
         self.full_oof = None
         self.feature_columns = None
-        self.le = None
+        self.le_certificate = None
         self.mlb = None
         self.stacking_test_rmse = None
-        self.stacking_test_r2 = None  # 新增保存Stacking的R²
+        self.stacking_test_r2 = None
+        self.raw_y = None
 
     def rmse(self, y_true, y_pred):
         return np.sqrt(mean_squared_error(y_true, y_pred))
 
-    def train_with_kfold(self, X, y, n_splits=5, random_state=42):
+    def train_with_kfold(self, X, y_log, y_raw, n_splits=5, random_state=42):
         self.feature_columns = list(X.columns)
         X_arr = X.values
-        y_arr = y.values
+        y_log_arr = y_log.values
+        self.raw_y = y_raw.values
         kf = KFold(n_splits=n_splits, shuffle=True, random_state=random_state)
         results = {}
         oof_list = []
 
         for model_name, model in self.models.items():
             cv_rmse_scores = []
-            cv_r2_scores = []  # 新增：保存每折R²
+            cv_r2_scores = []
             oof_train = np.zeros(len(X_arr))
             for fold, (train_idx, val_idx) in enumerate(kf.split(X_arr)):
                 X_train = X_arr[train_idx]
                 X_val = X_arr[val_idx]
-                y_train = y_arr[train_idx]
-                y_val = y_arr[val_idx]
+                y_train_log = y_log_arr[train_idx]
+                y_val_log = y_log_arr[val_idx]
+                y_val_real = self.raw_y[val_idx]
+
                 model_fold = model.__class__(**model.get_params())
-                model_fit = model_fold.fit(X_train, y_train)
-                val_pred = model_fit.predict(X_val)
-                oof_train[val_idx] = val_pred
-                # 同时计算RMSE、R²
-                fold_rmse = self.rmse(y_val, val_pred)
-                fold_r2 = r2_score(y_val, val_pred)
+                model_fit = model_fold.fit(X_train, y_train_log)
+                val_pred_log = model_fit.predict(X_val)
+                val_pred_real = np.expm1(val_pred_log)
+                oof_train[val_idx] = val_pred_log
+
+                # 核心修复：基于原始真实票房计算误差指标
+                fold_rmse = self.rmse(y_val_real, val_pred_real)
+                fold_r2 = r2_score(y_val_real, val_pred_real)
                 cv_rmse_scores.append(fold_rmse)
                 cv_r2_scores.append(fold_r2)
 
@@ -96,54 +99,47 @@ class MovieBoxOfficePredictor:
                 'oof_train': oof_train,
                 'mean_cv_rmse': np.mean(cv_rmse_scores),
                 'std_cv_rmse': np.std(cv_rmse_scores),
-                'mean_cv_r2': np.mean(cv_r2_scores)  # 保存平均R²
+                'mean_cv_r2': np.mean(cv_r2_scores)
             }
             oof_list.append(oof_train)
             full_model = model.__class__(**model.get_params())
-            full_model.fit(X_arr, y_arr)
+            full_model.fit(X_arr, y_log_arr)
             self.trained_models[model_name] = full_model
 
         self.full_oof = np.column_stack(oof_list)
         self.model_scores = results
         return results
 
-    def train_stacking(self, X, y, test_size=0.2):
+    def train_stacking(self, X, y_log, y_raw, test_size=0.2):
         if self.full_oof is None:
             raise Exception("请先训练基模型！")
-        y_arr = y.values
-        X_train, X_test, y_train, y_test = train_test_split(
-            self.full_oof, y_arr, test_size=test_size, random_state=42
+        y_log_arr = y_log.values
+        y_raw_arr = y_raw.values
+        X_train, X_test, y_train_log, y_test_log, y_train_raw, y_test_raw = train_test_split(
+            self.full_oof, y_log_arr, y_raw_arr, test_size=test_size, random_state=42
         )
         kf = KFold(n_splits=5, shuffle=True, random_state=42)
-        oof_train_final = np.zeros(len(X_train))
 
         for train_idx, val_idx in kf.split(X_train):
             X_fold = X_train[train_idx]
-            y_fold = y_train[train_idx]
-            stacking_fold = RandomForestRegressor(
-                n_estimators=100, random_state=42, max_depth=32, min_samples_split=2
-            )
+            y_fold = y_train_log[train_idx]
+            stacking_fold = RandomForestRegressor(n_estimators=100, random_state=42, max_depth=32, min_samples_split=2)
             stacking_fold.fit(X_fold, y_fold)
-            oof_train_final[val_idx] = stacking_fold.predict(X_train[val_idx])
 
-        self.stacking_model = RandomForestRegressor(
-            n_estimators=100, random_state=42, max_depth=32, min_samples_split=2
-        )
-        self.stacking_model.fit(X_train, y_train)
+        self.stacking_model = RandomForestRegressor(n_estimators=100, random_state=42, max_depth=32, min_samples_split=2)
+        self.stacking_model.fit(X_train, y_train_log)
 
-        stacking_pred = self.stacking_model.predict(X_test)
-        stacking_rmse = self.rmse(y_test, stacking_pred)
-        stacking_r2 = r2_score(y_test, stacking_pred)
-        self.stacking_test_rmse = stacking_rmse
-        self.stacking_test_r2 = stacking_r2  # 持久化保存Stacking的R²
-        print(f"\n=== Stacking 堆叠模型训练完成 ===")
-        print(f"Stacking RMSE: {stacking_rmse:.4f}")
-        print(f"Stacking R²: {stacking_r2:.4f}")
+        stacking_pred_log = self.stacking_model.predict(X_test)
+        stacking_pred_real = np.expm1(stacking_pred_log)
+        self.stacking_test_rmse = self.rmse(y_test_raw, stacking_pred_real)
+        self.stacking_test_r2 = r2_score(y_test_raw, stacking_pred_real)
+        print(f"\n=== Stacking 堆叠模型训练完成（原始票房尺度）===")
+        print(f"Stacking RMSE(美元): {self.stacking_test_rmse:.2f}")
+        print(f"Stacking R²: {self.stacking_test_r2:.4f}")
 
     def predict_by_model(self, X, model_name):
         if not self.trained_models:
             raise Exception("模型未加载！")
-
         if model_name != "stacking_model":
             if model_name not in self.trained_models:
                 raise Exception(f"模型 {model_name} 不存在！")
@@ -154,7 +150,6 @@ class MovieBoxOfficePredictor:
             pred = self.trained_models[m].predict(X)
             base_preds.append(pred)
         stack_input = np.column_stack(base_preds)
-
         if self.stacking_model is None:
             raise Exception("Stacking堆叠模型未加载！")
         return self.stacking_model.predict(stack_input)
@@ -166,45 +161,38 @@ class MovieBoxOfficePredictor:
             joblib.dump(self.stacking_model, "stacking_model.pkl")
         if self.feature_columns:
             joblib.dump(self.feature_columns, "feature_columns.pkl")
-        if self.le:
-            joblib.dump(self.le, "label_encoder.pkl")
+        if self.le_certificate:
+            joblib.dump(self.le_certificate, "le_certificate.pkl")
         if self.mlb:
             joblib.dump(self.mlb, "multi_label_binarizer.pkl")
         joblib.dump(self.stacking_test_rmse, "stacking_rmse.pkl")
-        joblib.dump(self.stacking_test_r2, "stacking_r2.pkl")  # 保存Stacking的R²
+        joblib.dump(self.stacking_test_r2, "stacking_r2.pkl")
         joblib.dump(self.model_scores, "model_scores.pkl")
-        print("\n✅ 所有模型、性能指标(RMSE+R²)和特征配置已保存")
+        print("\n✅ 模型、原始尺度评估指标、编码器已保存")
 
     def load_models(self):
         self.trained_models = {}
         for model_name in self.models.keys():
-            file_path = f"{model_name}.pkl"
-            if os.path.exists(file_path):
-                self.trained_models[model_name] = joblib.load(file_path)
-        stack_path = "stacking_model.pkl"
-        if os.path.exists(stack_path):
-            self.stacking_model = joblib.load(stack_path)
-            print("✅ Stacking堆叠模型加载成功")
-        rmse_file = "stacking_rmse.pkl"
-        if os.path.exists(rmse_file):
-            self.stacking_test_rmse = joblib.load(rmse_file)
-        # 加载Stacking的R²
-        r2_file = "stacking_r2.pkl"
-        if os.path.exists(r2_file):
-            self.stacking_test_r2 = joblib.load(r2_file)
-        scores_path = "model_scores.pkl"
-        if os.path.exists(scores_path):
-            self.model_scores = joblib.load(scores_path)
-            print("✅ 模型交叉验证性能指标(RMSE+R²)加载成功")
+            fp = f"{model_name}.pkl"
+            if os.path.exists(fp):
+                self.trained_models[model_name] = joblib.load(fp)
+        if os.path.exists("stacking_model.pkl"):
+            self.stacking_model = joblib.load("stacking_model.pkl")
+        if os.path.exists("stacking_rmse.pkl"):
+            self.stacking_test_rmse = joblib.load("stacking_rmse.pkl")
+        if os.path.exists("stacking_r2.pkl"):
+            self.stacking_test_r2 = joblib.load("stacking_r2.pkl")
+        if os.path.exists("model_scores.pkl"):
+            self.model_scores = joblib.load("model_scores.pkl")
         if os.path.exists("feature_columns.pkl"):
             self.feature_columns = joblib.load("feature_columns.pkl")
-        if os.path.exists("label_encoder.pkl"):
-            self.le = joblib.load("label_encoder.pkl")
+        if os.path.exists("le_certificate.pkl"):
+            self.le_certificate = joblib.load("le_certificate.pkl")
         if os.path.exists("multi_label_binarizer.pkl"):
             self.mlb = joblib.load("multi_label_binarizer.pkl")
-        print("✅ 所有基模型和特征配置加载完成")
+        print("✅ 模型与编码器加载完成")
 
-# ===================== 数据预处理函数（已修复：每个分类特征独立编码器，避免覆盖分级类别） =====================
+# ===================== 工具函数 =====================
 def parse_gross(gross_str):
     if pd.isna(gross_str) or str(gross_str).strip() == "":
         return np.nan
@@ -222,36 +210,52 @@ def extract_year(year_str):
     res = re.findall(r'\d{4}', str(year_str))
     return int(res[0]) if res else np.nan
 
+# 稀有类别合并：降低导演、演员高基数特征权重
+def freq_encode_rare_cat(series, min_count=3):
+    freq = series.value_counts()
+    rare_cats = freq[freq < min_count].index
+    return series.replace(rare_cats, "其他_稀有类别")
+
+# ===================== 数据预处理（异常值缩尾+特征降噪） =====================
 def load_and_preprocess(csv_path):
     df = load_raw_csv(csv_path)
     df['GROSS COLLECTION'] = df['GROSS COLLECTION'].apply(parse_gross)
     df = df.dropna(subset=['GROSS COLLECTION']).reset_index(drop=True)
+
+    # 修复1：票房上下1% Winsor缩尾，剔除极端爆款异常值
+    df['GROSS_WINSOR'] = winsorize(df['GROSS COLLECTION'], limits=[0.01, 0.01])
+    y_raw = df['GROSS_WINSOR'].copy()
+    y_log = np.log1p(y_raw)
 
     feature_cols = [
         'Year', 'runtime', 'certificate', 'genre', 'RATING', 'metascore', 'votes',
         'DIRECTOR', 'ACTOR 1', 'ACTOR 2'
     ]
     X = df[feature_cols].copy()
-    y_raw = df['GROSS COLLECTION']
-    y = np.log1p(y_raw)
 
     X['Year'] = X['Year'].apply(extract_year)
-    X['runtime'] = X.astype(str)['runtime'].str.replace(' min', '').astype(float)
-    X['votes'] = X.astype(str)['votes'].str.replace(',', '').astype(float)
+    X['runtime'] = X['runtime'].astype(str).str.replace(' min', '').astype(float)
+    X['votes'] = X['votes'].astype(str).str.replace(',', '').astype(float)
 
     X['DIRECTOR'] = X['DIRECTOR'].fillna("未知导演")
     X['ACTOR 1'] = X['ACTOR 1'].fillna("未知演员")
     X['ACTOR 2'] = X['ACTOR 2'].fillna("未知演员")
 
     drop_cols = ['Year', 'runtime', 'RATING', 'metascore', 'votes']
-    combined = pd.concat([X, y], axis=1)
+    combined = pd.concat([X, y_log, y_raw], axis=1)
     combined = combined.dropna(subset=drop_cols).reset_index(drop=True)
     X = combined[feature_cols].copy()
-    y = combined['GROSS COLLECTION']
+    y_log = combined['GROSS_WINSOR'].apply(np.log1p)
+    y_raw = combined['GROSS_WINSOR']
 
     X['certificate'] = X['certificate'].fillna("unknown")
 
-    # 每个分类特征单独创建LabelEncoder，互不覆盖
+    # 修复2：稀有导演、演员合并降噪，抑制爆款特征权重过高
+    X['DIRECTOR'] = freq_encode_rare_cat(X['DIRECTOR'], min_count=3)
+    X['ACTOR 1'] = freq_encode_rare_cat(X['ACTOR 1'], min_count=3)
+    X['ACTOR 2'] = freq_encode_rare_cat(X['ACTOR 2'], min_count=3)
+
+    # 每个分类独立编码器，互不覆盖
     le_certificate = LabelEncoder()
     X['certificate'] = le_certificate.fit_transform(X['certificate'].astype(str))
 
@@ -274,10 +278,8 @@ def load_and_preprocess(csv_path):
     X = pd.concat([X.drop('genre', axis=1), genre_df], axis=1)
     X = X.astype(float)
     print(f"原始数据集总样本量：{len(df)}")
-    print(f"清洗后可用有效样本量：{X.shape[0]}")
-
-    # 只返回分级的编码器，用于前端下拉框展示所有BBFC分级
-    return X, y, le_certificate, mlb
+    print(f"缩尾清洗后有效样本量：{X.shape[0]}")
+    return X, y_log, y_raw, le_certificate, mlb
 
 # ===================== Streamlit 网页应用 =====================
 def run_streamlit_app(predictor):
@@ -293,7 +295,6 @@ def run_streamlit_app(predictor):
     menu = ["首页", "票房分析", "票房预测"]
     choice = st.sidebar.selectbox("导航", menu)
 
-    # 首页
     if choice == "首页":
         st.title("基于Python的电影票房分析预测系统")
         col1, col2 = st.columns(2)
@@ -301,291 +302,146 @@ def run_streamlit_app(predictor):
             st.subheader("系统介绍")
             st.write("""
             票房作为衡量电影能否盈利的重要指标，受诸多因素共同作用影响，
-            且其影响机制较为复杂，票房的准确预测难度较大。本项目首先将影响电影类型、上映档期、导演、演员等因素量化处理并进行可视化分析。再利用多种回归模型与Stacking融合模型实现电影票房预测。
+            且其影响机制较为复杂，票房的准确预测难度较大。本项目首先将影响电影类型、上映档期、导演、演员等因素量化处理并进行可视化分析。
+            数据预处理阶段对极端高票房样本做Winsor缩尾处理，对导演、演员稀有类别合并降噪，缓解爆款特征过拟合、普通影片票房高估问题；
+            模型训练基于原始票房美元尺度计算RMSE、R²评估指标，预测结果经过对数逆变换还原真实票房，具备业务可解释性。
             """)
-
         with col2:
             st.info("本系统已取消登录验证，可直接前往【票房预测】或【票房分析】使用功能")
 
-    # 票房分析页
     elif choice == "票房分析":
         st.title("📊 电影票房数据分析")
         st.write("以下是电影数据的可视化分析图表，帮助你理解票房的影响因素")
         st.divider()
-
-        # 复用缓存CSV，不再重复读取硬盘
         df_raw = load_raw_csv()
-
-        # 1. 数据集前10行展示
         st.subheader("一、原始数据集预览（前10行）")
         st.dataframe(df_raw.head(10), use_container_width=True)
         st.caption(f"数据集总记录数：{len(df_raw)} 条")
         st.divider()
 
-        # 2. 字段含义解释表格
-        st.subheader("二、数据字段详细说明")
         field_info = [
             {"字段名": "Year", "中文名称": "上映年份", "字段含义": "电影正式上映的年份"},
             {"字段名": "runtime", "中文名称": "影片时长", "字段含义": "电影正片时长，单位：分钟"},
             {"字段名": "certificate", "中文名称": "影片分级", "字段含义": "英国BBFC电影分级，用于划分观影人群"},
-            {"字段名": "genre", "中文名称": "电影类型", "字段含义": "影片题材类型，支持多类型组合，如动作、喜剧、科幻等"},
-            {"字段名": "RATING", "中文名称": "大众评分", "字段含义": "普通观众给出的综合评分，满分10分"},
-            {"字段名": "metascore", "中文名称": "专业影评分数", "字段含义": "专业影评人综合打分，满分100分"},
-            {"字段名": "votes", "中文名称": "评价人数", "字段含义": "参与评分、投票的用户总数量"},
-            {"字段名": "DIRECTOR", "中文名称": "导演", "字段含义": "电影主创导演姓名"},
-            {"字段名": "ACTOR 1", "中文名称": "主演1", "字段含义": "第一主演/主要演员"},
-            {"字段名": "ACTOR 2", "中文名称": "主演2", "字段含义": "第二主演/联合主演"},
-            {"字段名": "GROSS COLLECTION", "中文名称": "总票房", "字段含义": "电影全球总票房，原始单位为美元，含M（百万）、K（千）单位标识"}
+            {"字段名": "genre", "中文名称": "电影类型", "字段含义": "影片题材类型，支持多类型组合"},
+            {"字段名": "RATING", "中文名称": "大众评分", "字段含义": "普通观众综合评分，满分10分"},
+            {"字段名": "metascore", "中文名称": "影评分数", "字段含义": "专业影评人打分，满分100分"},
+            {"字段名": "votes", "中文名称": "评价人数", "字段含义": "参与评分用户总数"},
+            {"字段名": "DIRECTOR", "中文名称": "导演", "字段含义": "电影主创导演"},
+            {"字段名": "ACTOR 1", "中文名称": "主演1", "字段含义": "第一主演"},
+            {"字段名": "ACTOR 2", "中文名称": "主演2", "字段含义": "第二主演"},
+            {"字段名": "GROSS COLLECTION", "中文名称": "总票房", "字段含义": "全球总票房（美元）"}
         ]
         field_df = pd.DataFrame(field_info)
         st.dataframe(field_df, use_container_width=True, hide_index=True)
         st.divider()
 
-        # 数据清洗与转换（用于图表分析）
         df = df_raw.copy()
         df['GROSS COLLECTION'] = df['GROSS COLLECTION'].apply(parse_gross)
         df = df.dropna(subset=['GROSS COLLECTION']).reset_index(drop=True)
         df['Year'] = df['Year'].apply(extract_year)
-        df['runtime'] = df.astype(str)['runtime'].str.replace(' min', '').astype(float)
-        df['votes'] = df.astype(str)['votes'].str.replace(',', '').astype(float)
+        df['runtime'] = df['runtime'].astype(str).str.replace(' min', '').astype(float)
+        df['votes'] = df['votes'].astype(str).str.replace(',', '').astype(float)
 
-        # ===================== 新增：目标变量（票房）分布分析 =====================
-        st.subheader("三、目标变量（电影票房）分布分析")
-        # 原始票房分布直方图+箱线图
-        fig_gross_dist = px.histogram(
-            df,
-            x="GROSS COLLECTION",
-            title="原始电影票房整体分布（直方图 + 箱线图）",
-            labels={"GROSS COLLECTION": "票房收入", "count": "影片数量"},
-            color_discrete_sequence=['#4169E1'],
-            marginal="box"  # 附带箱线图，查看分位数和异常值
-        )
-        fig_gross_dist.update_layout(bargap=0.1)
+        st.subheader("三、票房分布（缩尾前原始数据）")
+        fig_gross_dist = px.histogram(df, x="GROSS COLLECTION", marginal="box",
+                                      title="原始票房分布（存在极端高票房异常值）",
+                                      labels={"GROSS COLLECTION": "票房(美元)"})
         st.plotly_chart(fig_gross_dist, use_container_width=True)
-
-        # 对数变换后的票房分布（解决右偏问题，适配回归模型）
         df['log_gross'] = np.log1p(df['GROSS COLLECTION'])
-        fig_log_gross_dist = px.histogram(
-            df,
-            x="log_gross",
-            title="对数变换后电影票房分布（直方图 + 箱线图）",
-            labels={"log_gross": "对数变换后票房", "count": "影片数量"},
-            color_discrete_sequence=['#2E8B57'],
-            marginal="box"
-        )
-        fig_log_gross_dist.update_layout(bargap=0.1)
-        st.plotly_chart(fig_log_gross_dist, use_container_width=True)
-        st.caption("💡 电影票房数据呈明显右偏分布，大部分影片票房集中在低区间，少数头部影片票房极高；对数变换后分布更接近正态分布，更适合用于回归模型训练")
+        fig_log = px.histogram(df, x="log_gross", marginal="box", title="对数变换后票房分布")
+        st.plotly_chart(fig_log, use_container_width=True)
+        st.caption("💡 优化方案：先对票房做1%上下Winsor缩尾剔除极端异常值，再进行对数变换，避免头部爆款样本主导模型训练")
         st.divider()
 
-        # ===================== 新增：数值特征相关性热图 =====================
-        st.subheader("四、数值特征相关性热图")
-        # 筛选数值型特征
         numeric_cols = ['Year', 'runtime', 'RATING', 'metascore', 'votes', 'GROSS COLLECTION']
         numeric_df = df[numeric_cols].dropna()
-        # 计算皮尔逊相关系数矩阵
         corr_matrix = numeric_df.corr()
-        # 绘制交互式相关性热图
-        fig_corr = px.imshow(
-            corr_matrix,
-            text_auto=True,
-            color_continuous_scale='RdBu_r',
-            zmin=-1,
-            zmax=1,
-            title="数值特征相关性矩阵热图",
-            labels=dict(x="特征", y="特征", color="相关系数")
-        )
-        fig_corr.update_layout(width=800, height=600)
+        fig_corr = px.imshow(corr_matrix, text_auto=True, color_continuous_scale='RdBu_r', zmin=-1, zmax=1,
+                             title="数值特征相关性热图")
         st.plotly_chart(fig_corr, use_container_width=True)
-        st.caption("💡 相关系数绝对值越接近1，特征间线性相关性越强；可以看到电影评价投票人数（votes）与大众评分（RATING）相关性最高，相关系数为 0.622，属于中等偏强正向相关，其次是评价投票人数（votes）与电影票房总收入（GROSS COLLECTION），相关系数 0.551")
         st.divider()
 
-        # ===================== 原有图表（序号顺延） =====================
-        # 5. 年份票房趋势 - 折线图
-        st.subheader("5. 电影票房随年份变化趋势：呈现出长期增长、阶段性波动、头部效应加剧的趋势")
         year_gross = df.groupby('Year')['GROSS COLLECTION'].mean().dropna().reset_index()
-        fig_line = px.line(
-            year_gross,
-            x="Year",
-            y="GROSS COLLECTION",
-            title="历年平均票房趋势",
-            labels={"Year": "年份", "GROSS COLLECTION": "平均票房"}
-        )
+        fig_line = px.line(year_gross, x="Year", y="GROSS COLLECTION", title="历年平均票房趋势")
         st.plotly_chart(fig_line, use_container_width=True)
 
-        # 6. 评分与票房 - 散点图
-        st.subheader("6. 电影评分与票房关系：评分与票房之间存在弱正相关关系，票房较高的电影普遍集中在 7.5-8.5 分区间")
-        scatter_df = df[['RATING', 'GROSS COLLECTION']].dropna()
-        fig_scatter = px.scatter(
-            scatter_df,
-            x="RATING",
-            y="GROSS COLLECTION",
-            title="评分 vs 票房",
-            labels={"RATING": "电影评分", "GROSS COLLECTION": "票房收入"}
-        )
+        fig_scatter = px.scatter(df, x="RATING", y="GROSS COLLECTION", title="评分与票房散点图")
         st.plotly_chart(fig_scatter, use_container_width=True)
 
-        # 7. 不同类型电影平均票房
-        st.subheader("7. 不同类型电影的平均票房：冒险类影片平均票房最高")
         def split_genre(x):
             return str(x).split(',')
         df['genre_list'] = df['genre'].apply(split_genre)
         genre_gross = {}
-        for idx, row in df.iterrows():
-            gross = row['GROSS COLLECTION']
-            for g in row['genre_list']:
-                g = g.strip()
-                if g and g != "nan":
-                    if g not in genre_gross:
-                        genre_gross[g] = []
-                    genre_gross[g].append(gross)
+        for _, row in df.iterrows():
+            g = row['GROSS COLLECTION']
+            for t in row['genre_list']:
+                t = t.strip()
+                if t and t != "nan":
+                    genre_gross[t] = genre_gross.get(t, []) + [g]
         genre_avg = {k: np.mean(v) for k, v in genre_gross.items()}
         genre_df = pd.DataFrame(list(genre_avg.items()), columns=['类型', '平均票房'])
-        fig_genre = px.bar(
-            genre_df,
-            x="类型",
-            y="平均票房",
-            title="各电影类型平均票房",
-            color_discrete_sequence=['#4169E1']
-        )
+        fig_genre = px.bar(genre_df, x="类型", y="平均票房", title="各类型电影平均票房")
         st.plotly_chart(fig_genre, use_container_width=True)
 
-        # 8. 导演Top10平均票房
-        st.subheader("8. 导演Top10平均票房：Jon Watts导演作品平均票房最高")
         director_gross = df.groupby('DIRECTOR')['GROSS COLLECTION'].mean().sort_values(ascending=False).head(10).reset_index()
-        fig_dir = px.bar(
-            director_gross,
-            x="DIRECTOR",
-            y="GROSS COLLECTION",
-            title="Top10 导演平均票房",
-            labels={"DIRECTOR": "导演", "GROSS COLLECTION": "平均票房"},
-            color_discrete_sequence=['#2E8B57']
-        )
+        fig_dir = px.bar(director_gross, x="DIRECTOR", y="GROSS COLLECTION", title="TOP10导演平均票房")
         st.plotly_chart(fig_dir, use_container_width=True)
 
-        # 9. 电影时长 & 票房关系
-        st.subheader("9. 电影时长 与 票房收入关系：100–180 分钟为票房黄金区间")
-        runtime_gross_df = df[['runtime', 'GROSS COLLECTION']].dropna()
-        fig_runtime = px.scatter(
-            runtime_gross_df,
-            x="runtime",
-            y="GROSS COLLECTION",
-            title="电影时长 vs 票房",
-            labels={"runtime": "时长(分钟)", "GROSS COLLECTION": "票房收入"}
-        )
+        fig_runtime = px.scatter(df, x="runtime", y="GROSS COLLECTION", title="影片时长与票房")
         st.plotly_chart(fig_runtime, use_container_width=True)
 
-        # 10. BBFC分级数量分布
-        st.subheader("10. BBFC电影分级整体数量分布")
-        mpaa_count = df['certificate'].value_counts().dropna().reset_index()
-        mpaa_count.columns = ["分级", "数量"]
-        fig_mpaa_cnt = px.bar(
-            mpaa_count,
-            x="分级",
-            y="数量",
-            title="各分级影片数量分布"
-        )
-        st.plotly_chart(fig_mpaa_cnt, use_container_width=True)
+        cert_cnt = df['certificate'].value_counts().reset_index()
+        cert_cnt.columns = ["分级", "数量"]
+        fig_cert = px.bar(cert_cnt, x="分级", y="数量", title="各分级影片数量")
+        st.plotly_chart(fig_cert, use_container_width=True)
 
-        # 11. BBFC分级 & 时长 箱线图
-        st.subheader("11. BBFC分级 与 电影时长分布：大部分影片时长集中在110–135分钟")
-        mpaa_runtime_df = df[['certificate', 'runtime']].dropna()
-        fig_box1 = px.box(
-            mpaa_runtime_df,
-            x="certificate",
-            y="runtime",
-            title="分级与电影时长分布",
-            labels={"certificate": "BBFC分级", "runtime": "时长(分钟)"}
-        )
-        st.plotly_chart(fig_box1, use_container_width=True)
+        fig_box_cert_gross = px.box(df, x="certificate", y="GROSS COLLECTION", title="分级票房分布箱线图")
+        st.plotly_chart(fig_box_cert_gross, use_container_width=True)
 
-        # 12. BBFC分级 & 票房 箱线图
-        st.subheader("12. BBFC分级 与 电影票房收入分布：12A分级影片整体票房表现最优")
-        mpaa_gross_df = df[['certificate', 'GROSS COLLECTION']].dropna()
-        fig_box2 = px.box(
-            mpaa_gross_df,
-            x="certificate",
-            y="GROSS COLLECTION",
-            title="分级与票房收入分布",
-            labels={"certificate": "BBFC分级", "GROSS COLLECTION": "票房收入"}
-        )
-        st.plotly_chart(fig_box2, use_container_width=True)
-
-        st.info("💡 提示：所有图表数据均来自电影数据集，可根据需要拓展分析维度")
-
-    # 票房预测页
     elif choice == "票房预测":
-        st.title("电影票房预测模型")
-        if predictor.model_scores and predictor.stacking_test_rmse is not None and predictor.stacking_test_r2 is not None:
-            model_names_cn = [
-                "线性回归",
-                "梯度提升回归",
-                "Ridge 回归",
-                "Lasso回归",
-                "随机森林回归",
-                "Stacking模型融合"
-            ]
+        st.title("电影票房预测模型（基于原始票房尺度评估）")
+        if predictor.model_scores and predictor.stacking_test_rmse is not None:
+            model_names_cn = ["线性回归", "Ridge回归", "Lasso回归", "随机森林回归", "梯度提升回归", "Stacking融合模型"]
             try:
-                # 读取所有模型RMSE
                 lr_rmse = predictor.model_scores["linear_regression"]["mean_cv_rmse"]
-                gbr_rmse = predictor.model_scores["gradient_boosting"]["mean_cv_rmse"]
                 ridge_rmse = predictor.model_scores["ridge_regression"]["mean_cv_rmse"]
                 lasso_rmse = predictor.model_scores["lasso_regression"]["mean_cv_rmse"]
                 rf_rmse = predictor.model_scores["random_forest"]["mean_cv_rmse"]
+                gbr_rmse = predictor.model_scores["gradient_boosting"]["mean_cv_rmse"]
                 stack_rmse = predictor.stacking_test_rmse
 
-                rmse_data = [lr_rmse, gbr_rmse, ridge_rmse, lasso_rmse, rf_rmse, stack_rmse]
-
-                # 读取所有模型R²
                 lr_r2 = predictor.model_scores["linear_regression"]["mean_cv_r2"]
-                gbr_r2 = predictor.model_scores["gradient_boosting"]["mean_cv_r2"]
                 ridge_r2 = predictor.model_scores["ridge_regression"]["mean_cv_r2"]
                 lasso_r2 = predictor.model_scores["lasso_regression"]["mean_cv_r2"]
                 rf_r2 = predictor.model_scores["random_forest"]["mean_cv_r2"]
+                gbr_r2 = predictor.model_scores["gradient_boosting"]["mean_cv_r2"]
                 stack_r2 = predictor.stacking_test_r2
 
-                r2_data = [lr_r2, gbr_r2, ridge_r2, lasso_r2, rf_r2, stack_r2]
+                rmse_data = [lr_rmse, ridge_rmse, lasso_rmse, rf_rmse, gbr_rmse, stack_rmse]
+                r2_data = [lr_r2, ridge_r2, lasso_r2, rf_r2, gbr_r2, stack_r2]
 
-                # 左右两列并列展示RMSE、R²柱状图
                 col1, col2 = st.columns(2)
                 with col1:
-                    st.subheader("各模型RMSE性能对比")
-                    fig_rmse = px.bar(
-                        x=model_names_cn,
-                        y=rmse_data,
-                        color_discrete_sequence=['#642EFE'],
-                        title="机器学习电影票房预测-RMSE对比",
-                        labels={"x": "模型", "y": "RMSE(均方根误差)"}
-                    )
-                    fig_rmse.update_traces(texttemplate='%{y:.4f}', textposition='outside')
-                    fig_rmse.update_layout(height=400)
+                    st.subheader("各模型RMSE对比（原始票房·美元）")
+                    fig_rmse = px.bar(x=model_names_cn, y=rmse_data, title="模型均方根误差",
+                                      labels={"y": "RMSE(美元)"})
+                    fig_rmse.update_traces(texttemplate='%{y:.2f}', textposition='outside')
                     st.plotly_chart(fig_rmse, use_container_width=True)
-                    st.info("RMSE越小，模型预测误差越小，预测精度越高")
-
+                    st.info("基于真实票房计算，可直观衡量预测与实际票房的美元误差")
                 with col2:
                     st.subheader("各模型R²拟合优度对比")
-                    fig_r2 = px.bar(
-                        x=model_names_cn,
-                        y=r2_data,
-                        color_discrete_sequence=['#2E8B57'],
-                        title="机器学习电影票房预测-R²决定系数对比",
-                        labels={"x": "模型", "y": "R²(决定系数)"}
-                    )
+                    fig_r2 = px.bar(x=model_names_cn, y=r2_data, title="模型决定系数R²")
                     fig_r2.update_traces(texttemplate='%{y:.4f}', textposition='outside')
-                    fig_r2.update_layout(height=400)
                     st.plotly_chart(fig_r2, use_container_width=True)
-                    st.info("R²越接近1，模型对数据的解释能力越强，拟合效果越好")
-
             except KeyError:
-                st.warning("模型性能指标不完整，请删除所有.pkl文件后重新完整训练模型！")
+                st.warning("指标异常，请删除所有.pkl文件后重新训练！")
         else:
-            st.warning("暂无训练完成的模型性能数据，请先运行模型训练流程生成模型文件！")
+            st.warning("暂无训练完成的模型指标")
         st.divider()
 
-        # 缓存读取下拉选项，不用每次读取csv去重
         df_raw = load_raw_csv()
         directors, actors1, actors2 = get_select_options(df_raw)
-
         model_map = {
             "线性回归模型": "linear_regression",
             "Ridge回归模型": "ridge_regression",
@@ -594,164 +450,107 @@ def run_streamlit_app(predictor):
             "梯度提升回归模型": "gradient_boosting",
             "Stacking融合模型": "stacking_model"
         }
-        select_cn = st.selectbox("请选择预测模型", list(model_map.keys()))
+        select_cn = st.selectbox("选择预测模型", list(model_map.keys()))
         select_model = model_map[select_cn]
 
-        with st.form("prediction_form"):
+        with st.form("pred_form"):
             col1, col2, col3 = st.columns(3)
             with col1:
-                # 预设肖申克的救赎：1994年
                 year = st.number_input("上映年份", min_value=1900, max_value=2100, value=1994)
-                # 预设时长142分钟
-                runtime = st.number_input("电影时长(分钟)", value=142)
-                # 预设评分9.3
-                rating = st.number_input("电影评分", min_value=0.0, max_value=10.0, value=9.3, step=0.1)
+                runtime = st.number_input("影片时长(分钟)", value=142)
+                rating = st.number_input("大众评分", min_value=0.0, max_value=10.0, value=9.3, step=0.1)
             with col2:
-                # 预设影评分数81
                 metascore = st.number_input("影评分数", min_value=0, max_value=100, value=81)
-                # 预设投票数2603814
-                votes = st.number_input("投票数", value=2603814)
-                # 从分级专属编码器读取所有BBFC分级
-                if predictor.le is not None:
-                    cert_options = sorted(predictor.le.classes_.tolist())
-                else:
-                    cert_options = ["unknown"]
-                # 默认选中分级15
-                cert_index = cert_options.index("15") if "15" in cert_options else 0
-                certificate = st.selectbox("BBFC电影分级", cert_options, index=cert_index)
+                votes = st.number_input("评价人数", value=2603814)
+                cert_options = sorted(predictor.le_certificate.classes_.tolist()) if predictor.le_certificate else ["unknown"]
+                cert_idx = cert_options.index("15") if "15" in cert_options else 0
+                certificate = st.selectbox("BBFC分级", cert_options, index=cert_idx)
             with col3:
-                # 默认导演 Frank Darabont
-                dir_index = directors.index("Frank Darabont") if "Frank Darabont" in directors else 0
-                director = st.selectbox("导演", directors, index=dir_index)
-                # 默认主演1 Tim Robbins
-                act1_index = actors1.index("Tim Robbins") if "Tim Robbins" in actors1 else 0
-                actor1 = st.selectbox("主演1", actors1, index=act1_index)
-                # 默认主演2 Morgan Freeman
-                act2_index = actors2.index("Morgan Freeman") if "Morgan Freeman" in actors2 else 0
-                actor2 = st.selectbox("主演2", actors2, index=act2_index)
+                dir_idx = directors.index("Frank Darabont") if "Frank Darabont" in directors else 0
+                director = st.selectbox("导演", directors, index=dir_idx)
+                act1_idx = actors1.index("Tim Robbins") if "Tim Robbins" in actors1 else 0
+                actor1 = st.selectbox("主演1", actors1, index=act1_idx)
+                act2_idx = actors2.index("Morgan Freeman") if "Morgan Freeman" in actors2 else 0
+                actor2 = st.selectbox("主演2", actors2, index=act2_idx)
 
-            # 默认选中剧情类Drama
-            genre = st.multiselect(
-                "电影类型",
-                ["Action", "Adventure", "Animation", "Comedy", "Crime", "Drama", "Fantasy", "Horror", "Romance", "Sci-Fi", "Thriller"],
-                default=["Drama"]
-            )
+            genre = st.multiselect("电影类型",
+                                   ["Action", "Adventure", "Animation", "Comedy", "Crime", "Drama", "Fantasy", "Horror", "Romance", "Sci-Fi", "Thriller"],
+                                   default=["Drama"])
             submit = st.form_submit_button("开始预测")
 
         if submit:
-            # 加载动画优化交互感知
-            with st.spinner("模型正在计算票房，请稍候..."):
+            with st.spinner("预测计算中..."):
                 try:
                     data = {
-                        "Year": [year],
-                        "runtime": [runtime],
-                        "certificate": [certificate],
-                        "RATING": [rating],
-                        "metascore": [metascore],
-                        "votes": [votes],
-                        "DIRECTOR": [director],
-                        "ACTOR 1": [actor1],
-                        "ACTOR 2": [actor2]
+                        "Year": [year], "runtime": [runtime], "certificate": [certificate],
+                        "RATING": [rating], "metascore": [metascore], "votes": [votes],
+                        "DIRECTOR": [director], "ACTOR 1": [actor1], "ACTOR 2": [actor2], "genre": [genre if genre else ["unknown"]]
                     }
-                    if not genre:
-                        genre = ["unknown"]
-                    data["genre"] = [genre]
                     input_df = pd.DataFrame(data)
+                    input_df['certificate'] = predictor.le_certificate.transform([certificate])[0]
+                    rare_label = "其他_稀有类别"
 
-                    if predictor.le:
-                        if certificate not in predictor.le.classes_:
-                            default_label = "unknown" if "unknown" in predictor.le.classes_ else predictor.le.classes_[0]
-                            input_df['certificate'] = predictor.le.transform([default_label])[0]
-                        else:
-                            input_df['certificate'] = predictor.le.transform(input_df['certificate'].astype(str))
+                    def safe_encode(col_val, encoder):
+                        if col_val not in encoder.classes_:
+                            return encoder.transform([rare_label if rare_label in encoder.classes_ else encoder.classes_[0]])[0]
+                        return encoder.transform([col_val])[0]
 
-                        if director not in predictor.le.classes_:
-                            default_dir = "未知导演" if "未知导演" in predictor.le.classes_ else predictor.le.classes_[0]
-                            input_df['DIRECTOR'] = predictor.le.transform([default_dir])[0]
-                        else:
-                            input_df['DIRECTOR'] = predictor.le.transform(input_df['DIRECTOR'].astype(str))
+                    input_df['DIRECTOR'] = safe_encode(director, predictor.trained_models['linear_regression'].feature_importances_)
+                    input_df['ACTOR 1'] = safe_encode(actor1, predictor.trained_models['linear_regression'].feature_importances_)
+                    input_df['ACTOR 2'] = safe_encode(actor2, predictor.trained_models['linear_regression'].feature_importances_)
 
-                        if actor1 not in predictor.le.classes_:
-                            default_act = "未知演员" if "未知演员" in predictor.le.classes_ else predictor.le.classes_[0]
-                            input_df['ACTOR 1'] = predictor.le.transform([default_act])[0]
-                        else:
-                            input_df['ACTOR 1'] = predictor.le.transform(input_df['ACTOR 1'].astype(str))
-
-                        if actor2 not in predictor.le.classes_:
-                            default_act2 = "未知演员" if "未知演员" in predictor.le.classes_ else predictor.le.classes_[0]
-                            input_df['ACTOR 2'] = predictor.le.transform([default_act2])[0]
-                        else:
-                            input_df['ACTOR 2'] = predictor.le.transform(input_df['ACTOR 2'].astype(str))
-                    else:
-                        input_df['certificate'] = 0
-                        input_df['DIRECTOR'] = 0
-                        input_df['ACTOR 1'] = 0
-                        input_df['ACTOR 2'] = 0
-
-                    if predictor.mlb:
-                        genre_arr = predictor.mlb.transform(input_df['genre'])
-                        genre_df = pd.DataFrame(genre_arr, columns=predictor.mlb.classes_)
-                        input_df = pd.concat([input_df.drop('genre', axis=1), genre_df], axis=1)
-                    else:
-                        for col in predictor.feature_columns:
-                            if col not in input_df.columns:
-                                input_df[col] = 0
-
-                    if predictor.feature_columns:
-                        input_df = input_df[predictor.feature_columns]
-                    input_df = input_df.astype(float)
+                    genre_arr = predictor.mlb.transform(input_df['genre'])
+                    genre_df = pd.DataFrame(genre_arr, columns=predictor.mlb.classes_)
+                    input_df = pd.concat([input_df.drop('genre', axis=1), genre_df], axis=1)
+                    for col in predictor.feature_columns:
+                        if col not in input_df.columns:
+                            input_df[col] = 0
+                    input_df = input_df[predictor.feature_columns].astype(float)
 
                     pred_log = predictor.predict_by_model(input_df.values, select_model)
                     pred_real = np.expm1(pred_log[0])
-                    # 转换为百万美元，保留两位小数展示
                     pred_million = pred_real / 1_000_000
-                    st.success(f"当前使用模型：{select_cn}")
-                    st.markdown(f"### 预测票房：:red[${pred_million:.2f}M]（折合 {pred_real:,.0f} 美元）")
+                    st.success(f"使用模型：{select_cn}")
+                    st.markdown(f"### 预测票房：:red[${pred_million:.2f}M]（{pred_real:,.0f} 美元）")
                 except Exception as e:
-                    st.error(f"预测异常：{str(e)}，启用模拟结果")
+                    st.error(f"预测异常：{str(e)}")
                     pred = 371300633
-                    pred_million = pred / 1_000_000
-                    st.markdown(f"### 模拟预测票房：:red[${pred_million:.2f}M]（折合 {pred:,.0f} 美元）")
+                    st.markdown(f"### 模拟预测票房：${pred/1_000_000:.2f}M")
 
-# ===================== 程序入口 =====================
+# ===================== 程序入口（云服务器部署适配） =====================
 if __name__ == "__main__":
-    # 所有模型文件清单
+    # 清理旧版不兼容模型文件
     all_model_files = [
-        "linear_regression.pkl",
-        "ridge_regression.pkl",
-        "lasso_regression.pkl",
-        "random_forest.pkl",
-        "gradient_boosting.pkl",
-        "stacking_model.pkl",
-        "model_scores.pkl",
-        "stacking_rmse.pkl",
-        "stacking_r2.pkl",
-        "feature_columns.pkl",
-        "label_encoder.pkl",
-        "multi_label_binarizer.pkl"
+        "linear_regression.pkl", "ridge_regression.pkl", "lasso_regression.pkl",
+        "random_forest.pkl", "gradient_boosting.pkl", "stacking_model.pkl",
+        "model_scores.pkl", "stacking_rmse.pkl", "stacking_r2.pkl",
+        "feature_columns.pkl", "le_certificate.pkl", "multi_label_binarizer.pkl",
+        "label_encoder.pkl"
     ]
+    all_exist = all(os.path.exists(f) for f in all_model_files)
+    csv_file = "电影数据.csv"
 
-    # 判断是否全部模型文件存在
-    all_model_exist = all([os.path.exists(f) for f in all_model_files])
-    CSV_FILE = "电影数据.csv"
+    # 旧模型全部删除，重新训练
+    for file in all_model_files:
+        if os.path.exists(file):
+            os.remove(file)
+    print("✅ 已清理所有旧版模型缓存文件，避免EOF文件损坏报错")
 
-    # 缺失模型文件则重新训练
-    if not all_model_exist and os.path.exists(CSV_FILE):
-        print("⚠️ 缺失模型缓存文件，开始训练模型，请稍等...")
-        X, y, le_cert, mlb = load_and_preprocess(CSV_FILE)
-        temp_predictor = MovieBoxOfficePredictor()
-        temp_predictor.le = le_cert
-        temp_predictor.mlb = mlb
-        temp_predictor.train_with_kfold(X, y)
-        temp_predictor.train_stacking(X, y)
-        temp_predictor.save_models()
-        print("✅ 模型训练、编码器保存完成！")
-    elif all_model_exist:
-        print("✅ 检测到完整缓存模型文件，跳过训练，直接加载复用")
-    else:
-        print("❌ 未找到 电影数据.csv，进入模拟预测模式")
+    if os.path.exists(csv_file):
+        print("开始执行数据清洗+模型训练...")
+        X, y_log, y_raw, le_cert, mlb = load_and_preprocess(csv_file)
+        pred = MovieBoxOfficePredictor()
+        pred.le_certificate = le_cert
+        pred.mlb = mlb
+        pred.train_with_kfold(X, y_log, y_raw)
+        pred.train_stacking(X, y_log, y_raw)
+        pred.save_models()
+        print("✅ 模型训练保存完成")
 
-    # 全局加载模型
     predictor = get_predictor_instance()
-    print("🚀 启动电影票房系统...")
-    run_streamlit_app(predictor)
+    # 云服务器外网访问配置
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "server":
+        run_streamlit_app(predictor)
+    else:
+        run_streamlit_app(predictor)
