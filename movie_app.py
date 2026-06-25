@@ -588,7 +588,7 @@ def run_streamlit_app(predictor):
 
         model_map = {
             "梯度提升回归模型": "gradient_boosting",
-            "Stacking融合模型": "stacking_model"
+            "Stacking融合模型": "stacking_model",
             "随机森林回归模型": "random_forest",
             "线性回归模型": "linear_regression",
             "Ridge回归模型": "ridge_regression",
