@@ -587,12 +587,14 @@ def run_streamlit_app(predictor):
         directors, actors1, actors2 = get_select_options(df_raw)
 
         model_map = {
+            "梯度提升回归模型": "gradient_boosting",
+            "Stacking融合模型": "stacking_model"
+            "随机森林回归模型": "random_forest",
             "线性回归模型": "linear_regression",
             "Ridge回归模型": "ridge_regression",
             "Lasso回归模型": "lasso_regression",
-            "随机森林回归模型": "random_forest",
-            "梯度提升回归模型": "gradient_boosting",
-            "Stacking融合模型": "stacking_model"
+            
+            
         }
         select_cn = st.selectbox("请选择预测模型", list(model_map.keys()))
         select_model = model_map[select_cn]
